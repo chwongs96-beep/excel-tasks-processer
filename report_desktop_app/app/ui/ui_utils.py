@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QFrame, QPushButton, QVBoxLayout, QWidget
 
+from app.ui.styles import current_theme
 from app.ui.ui_metrics import (
     BTN_HEIGHT,
     BTN_HEIGHT_COMPACT,
@@ -86,3 +87,39 @@ def hint_label(text: str) -> QWidget:
     label.setProperty("role", "hint")
     label.setWordWrap(True)
     return label
+
+
+def themed_help_css() -> str:
+    """CSS for help/readme browsers to keep theme colors consistent."""
+    t = current_theme()
+    return f"""
+        body {{
+            color: {t.text_primary};
+            background: {t.card_bg};
+            font-family: "Microsoft JhengHei UI", "Segoe UI", sans-serif;
+            line-height: 1.55;
+        }}
+        h1, h2, h3, h4, h5 {{
+            color: {t.card_title};
+        }}
+        p, li, td, th, span, div {{
+            color: {t.text_primary};
+        }}
+        a {{
+            color: {t.tab_accent};
+        }}
+        table, th, td {{
+            border-color: {t.border};
+        }}
+        code {{
+            color: {t.text_primary};
+            background: {t.secondary_bg};
+            border: 1px solid {t.border};
+            border-radius: 4px;
+            padding: 1px 4px;
+        }}
+    """
+
+
+def wrap_help_html(html: str) -> str:
+    return f"<style>{themed_help_css()}</style>{html}"

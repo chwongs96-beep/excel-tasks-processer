@@ -56,7 +56,7 @@ class ProcessStepsDialog(QDialog):
 
         self._list = QListWidget()
         self._list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.AlwaysOff)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         font = self._list.font()
         font.setPointSize(max(10, font.pointSize() - 1))
         self._list.setFont(font)

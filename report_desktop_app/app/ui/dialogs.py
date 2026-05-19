@@ -39,14 +39,18 @@ from app.core.mapping_utils import (
 )
 from app.core.range_spec import SourceRangeSpec
 from app.core.schemas import LoadedFile
-from app.services import mapping_presets, range_presets
+from app.services import filter_presets, mapping_presets, range_presets, setup_presets
 from app.services.excel_reader import ExcelReaderService
 from app.services.batch_report_service import BatchReportRequest, dates_in_range
+from app.services.setup_presets import SetupPreset
+from app.services.smart_profile_service import ProfileSuggestion
+from app.services.smart_mapping_advisor import MappingSuggestion
+from app.services.smart_mapping_advisor import from_config as advisor_from_config
 from app.services.reconcile_hints import suggest_amount_column, suggest_key_columns
 from app.services.reconcile_service import ReconcileRequest
 from app.ui.help_text import RECONCILE_HELP_HTML
 from app.ui.table_model import DataFrameTableModel
-from app.ui.ui_utils import hint_label, set_tooltip
+from app.ui.ui_utils import hint_label, set_tooltip, wrap_help_html
 
 
 class AboutDialog(QDialog):
@@ -71,6 +75,7 @@ class MappingDialog(QDialog):
         source_columns: list[str],
         current_mapping: dict[str, str],
         filename: str,
+        profile_suggestion: ProfileSuggestion | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -80,6 +85,8 @@ class MappingDialog(QDialog):
         self._source_columns = list(source_columns)
         self._mapping: dict[str, str] = dict(current_mapping)
         self._combos: dict[str, QComboBox] = {}
+        self._suggestions: dict[str, MappingSuggestion] = {}
+        self._profile_suggestion = profile_suggestion
 
         schema = config.load_schema_config()
         canonical_names = list(schema.canonical_fields)
@@ -93,6 +100,9 @@ class MappingDialog(QDialog):
         )
 
         self._build_preset_row(layout)
+        self._build_profile_row(layout)
+        self._build_advisor_row(layout)
+        self._build_smart_apply_row(layout)
 
         form = QFormLayout()
         for field in canonical_names:
@@ -132,6 +142,137 @@ class MappingDialog(QDialog):
 
         layout.addLayout(row)
 
+    def _build_profile_row(self, layout: QVBoxLayout) -> None:
+        if not self._profile_suggestion:
+            return
+        row = QHBoxLayout()
+        apply_btn = QPushButton("套用歷史設定")
+        apply_btn.clicked.connect(self._on_apply_profile)
+        row.addWidget(apply_btn)
+        confidence = int(round(self._profile_suggestion.confidence * 100))
+        row.addWidget(
+            hint_label(
+                f"歷史建議：{len(self._profile_suggestion.mapping)} 項（信心 {confidence}%）"
+                f"｜{self._profile_suggestion.reason}"
+            ),
+            stretch=1,
+        )
+        layout.addLayout(row)
+
+    def _on_apply_profile(self) -> None:
+        if not self._profile_suggestion:
+            return
+        self._mapping = self._merge_candidates(self._mapping, self._profile_suggestion.mapping)
+        self._apply_mapping_to_combos()
+
+    def _build_advisor_row(self, layout: QVBoxLayout) -> None:
+        mode_cfg = config.load_smart_mode_config()
+        if not bool(mode_cfg.get("enabled", True)):
+            return
+        try:
+            advisor = advisor_from_config()
+            self._suggestions = advisor.suggest(source_columns=self._source_columns)
+        except Exception:  # noqa: BLE001
+            self._suggestions = {}
+
+        row = QHBoxLayout()
+        apply_btn = QPushButton("套用智慧建議")
+        apply_btn.clicked.connect(self._on_apply_suggestions)
+        apply_btn.setEnabled(bool(self._suggestions))
+        row.addWidget(apply_btn)
+        n_total = len(self._suggestions)
+        n_auto = sum(
+            1
+            for item in self._suggestions.values()
+            if item.score >= float(mode_cfg.get("advisor", {}).get("auto_apply_threshold", 0.85))
+        )
+        tip = (
+            f"智慧建議：{n_total} 項（高信心 {n_auto} 項）"
+            if n_total
+            else "智慧建議：目前欄位無明確對應"
+        )
+        row.addWidget(hint_label(tip), stretch=1)
+        layout.addLayout(row)
+
+    def _on_apply_suggestions(self) -> None:
+        if not self._suggestions:
+            QMessageBox.information(self, "智慧建議", "目前沒有可套用的映射建議。")
+            return
+        candidates = {field: item.source_column for field, item in self._suggestions.items()}
+        self._mapping = self._merge_candidates(self._mapping, candidates)
+        self._apply_mapping_to_combos()
+
+    def _build_smart_apply_row(self, layout: QVBoxLayout) -> None:
+        candidates = self._smart_candidates()
+        if not candidates:
+            return
+        conflict_count = len(self._smart_conflicts())
+        row = QHBoxLayout()
+        apply_btn = QPushButton("一鍵智能套用")
+        apply_btn.clicked.connect(self._on_apply_smart)
+        row.addWidget(apply_btn)
+        if conflict_count:
+            msg = f"衝突 {conflict_count} 項（優先採用歷史設定）"
+        else:
+            msg = "歷史與智慧建議已整合"
+        row.addWidget(hint_label(msg), stretch=1)
+        layout.addLayout(row)
+        if conflict_count:
+            self._conflict_list = QListWidget()
+            self._conflict_list.setProperty("role", "conflict-list")
+            self._conflict_list.setMaximumHeight(120)
+            self._conflict_list.setAlternatingRowColors(True)
+            for field, (profile_col, advisor_col) in self._smart_conflicts().items():
+                self._conflict_list.addItem(
+                    f"{field}: 歷史「{profile_col}」 / 智慧「{advisor_col}」"
+                )
+            layout.addWidget(
+                hint_label("衝突清單：一鍵智能套用時，會先採用歷史設定。")
+            )
+            layout.addWidget(self._conflict_list)
+
+    def _on_apply_smart(self) -> None:
+        candidates = self._smart_candidates()
+        if not candidates:
+            QMessageBox.information(self, "智能套用", "目前沒有可套用的建議。")
+            return
+        self._mapping = self._merge_candidates(self._mapping, candidates)
+        self._apply_mapping_to_combos()
+
+    def _smart_candidates(self) -> dict[str, str]:
+        merged: dict[str, str] = {}
+        if self._profile_suggestion:
+            merged.update(self._profile_suggestion.mapping)
+        for field, suggestion in self._suggestions.items():
+            merged.setdefault(field, suggestion.source_column)
+        return merged
+
+    def _smart_conflicts(self) -> dict[str, tuple[str, str]]:
+        if not self._profile_suggestion or not self._suggestions:
+            return {}
+        conflicts: dict[str, tuple[str, str]] = {}
+        for field, profile_col in self._profile_suggestion.mapping.items():
+            advisor = self._suggestions.get(field)
+            if advisor and advisor.source_column != profile_col:
+                conflicts[field] = (profile_col, advisor.source_column)
+        return conflicts
+
+    @staticmethod
+    def _merge_candidates(base: dict[str, str], candidates: dict[str, str]) -> dict[str, str]:
+        """Merge mapping without overriding user-set fields or duplicating source columns."""
+        result = dict(base)
+        used_sources = {source for source in result.values() if source}
+        for field, source in candidates.items():
+            if not source:
+                continue
+            if result.get(field):
+                continue
+            if source in used_sources:
+                continue
+            result[field] = source
+            used_sources.add(source)
+        return result
+
     def _on_load_preset(self) -> None:
         name = self._preset_combo.currentData()
         if not name:
@@ -153,10 +294,7 @@ class MappingDialog(QDialog):
             return
 
         self._mapping = storage_to_ui_mapping(stored, self._filename)
-        for field, combo in self._combos.items():
-            selected = self._mapping.get(field, "")
-            index = combo.findData(selected)
-            combo.setCurrentIndex(index if index >= 0 else 0)
+        self._apply_mapping_to_combos()
 
     def _on_save_preset(self) -> None:
         name, ok = QInputDialog.getText(self, "儲存 preset", "Preset 名稱：")
@@ -183,6 +321,12 @@ class MappingDialog(QDialog):
         if index >= 0:
             self._preset_combo.setCurrentIndex(index)
 
+    def _apply_mapping_to_combos(self) -> None:
+        for field, combo in self._combos.items():
+            selected = self._mapping.get(field, "")
+            index = combo.findData(selected)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+
     def mapping(self) -> dict[str, str]:
         """Canonical field -> Excel column name (empty entries omitted)."""
         result: dict[str, str] = {}
@@ -191,6 +335,166 @@ class MappingDialog(QDialog):
             if value:
                 result[field] = str(value)
         return result
+
+
+class SetupRunnerDialog(QDialog):
+    """Manage saved setups and choose selected/all execution mode."""
+
+    def __init__(self, *, current_setup: SetupPreset, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Setup 批次執行")
+        self.resize(620, 460)
+        self._current_setup = current_setup
+        self._run_mode: str | None = None
+        self._continue_on_error = True
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "可先儲存目前設定，再選擇執行單一 setup 或全部依序執行。"
+                "（第一版：序列執行）"
+            )
+        )
+
+        row = QHBoxLayout()
+        self._name_edit = QLineEdit(current_setup.name or "")
+        self._name_edit.setPlaceholderText("輸入 setup 名稱（例如：日報_台股）")
+        row.addWidget(self._name_edit, stretch=1)
+        save_btn = QPushButton("儲存目前設定")
+        save_btn.clicked.connect(self._on_save_current)
+        row.addWidget(save_btn)
+        layout.addLayout(row)
+
+        preset_form = QFormLayout()
+        self._mapping_combo = QComboBox()
+        self._mapping_combo.addItem("（不綁定）", "")
+        for name in mapping_presets.list_presets():
+            self._mapping_combo.addItem(name, name)
+        if current_setup.mapping_preset:
+            idx = self._mapping_combo.findData(current_setup.mapping_preset)
+            if idx >= 0:
+                self._mapping_combo.setCurrentIndex(idx)
+        preset_form.addRow("mapping preset：", self._mapping_combo)
+
+        self._range_combo = QComboBox()
+        self._range_combo.addItem("（不綁定）", "")
+        for name in range_presets.list_presets():
+            self._range_combo.addItem(name, name)
+        if current_setup.range_preset:
+            idx = self._range_combo.findData(current_setup.range_preset)
+            if idx >= 0:
+                self._range_combo.setCurrentIndex(idx)
+        preset_form.addRow("range preset：", self._range_combo)
+
+        self._filter_combo = QComboBox()
+        self._filter_combo.addItem("（不綁定）", "")
+        for name in filter_presets.list_presets():
+            self._filter_combo.addItem(name, name)
+        if current_setup.filter_preset:
+            idx = self._filter_combo.findData(current_setup.filter_preset)
+            if idx >= 0:
+                self._filter_combo.setCurrentIndex(idx)
+        preset_form.addRow("filter preset：", self._filter_combo)
+        layout.addLayout(preset_form)
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        layout.addWidget(self._list, stretch=1)
+
+        self._continue = QCheckBox("遇錯繼續後續 setup（建議開啟）")
+        self._continue.setChecked(True)
+        layout.addWidget(self._continue)
+
+        actions = QHBoxLayout()
+        del_btn = QPushButton("刪除選取")
+        del_btn.clicked.connect(self._on_delete_selected)
+        actions.addWidget(del_btn)
+        actions.addStretch()
+
+        run_one = QPushButton("執行選取")
+        run_one.clicked.connect(self._on_run_selected)
+        actions.addWidget(run_one)
+        run_all = QPushButton("全部依序執行")
+        run_all.clicked.connect(self._on_run_all)
+        actions.addWidget(run_all)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        layout.addLayout(actions)
+
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        self._list.clear()
+        for name in setup_presets.list_presets():
+            item = QListWidgetItem(name)
+            self._list.addItem(item)
+
+    def _on_save_current(self) -> None:
+        name = self._name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "儲存 setup", "請先輸入 setup 名稱。")
+            return
+        preset = SetupPreset(
+            name=name,
+            report_type=self._current_setup.report_type,
+            template_path=self._current_setup.template_path,
+            output_dir=self._current_setup.output_dir,
+            trade_date=self._current_setup.trade_date,
+            week_start=self._current_setup.week_start,
+            week_end=self._current_setup.week_end,
+            month=self._current_setup.month,
+            mapping_preset=str(self._mapping_combo.currentData() or "") or None,
+            range_preset=str(self._range_combo.currentData() or "") or None,
+            filter_preset=str(self._filter_combo.currentData() or "") or None,
+        )
+        try:
+            path = setup_presets.save_preset(preset)
+        except ValueError as exc:
+            QMessageBox.warning(self, "儲存失敗", str(exc))
+            return
+        QMessageBox.information(self, "已儲存", f"已儲存至：\n{path}")
+        self._refresh_list()
+
+    def _on_delete_selected(self) -> None:
+        names = self.selected_names()
+        if not names:
+            QMessageBox.information(self, "刪除 setup", "請先選擇至少一個 setup。")
+            return
+        if QMessageBox.question(
+            self,
+            "刪除 setup",
+            f"確定刪除 {len(names)} 個 setup？",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for name in names:
+            setup_presets.delete_preset(name)
+        self._refresh_list()
+
+    def _on_run_selected(self) -> None:
+        if not self.selected_names():
+            QMessageBox.information(self, "執行 setup", "請先選擇至少一個 setup。")
+            return
+        self._continue_on_error = self._continue.isChecked()
+        self._run_mode = "selected"
+        self.accept()
+
+    def _on_run_all(self) -> None:
+        if not setup_presets.list_presets():
+            QMessageBox.information(self, "執行 setup", "目前沒有可執行的 setup。")
+            return
+        self._continue_on_error = self._continue.isChecked()
+        self._run_mode = "all"
+        self.accept()
+
+    def run_mode(self) -> str | None:
+        return self._run_mode
+
+    def selected_names(self) -> list[str]:
+        return [item.text() for item in self._list.selectedItems() if item.text().strip()]
+
+    def continue_on_error(self) -> bool:
+        return self._continue_on_error
 
 
 class RangeSelectionDialog(QDialog):
@@ -440,7 +744,7 @@ class ReconcileDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
         browser = QTextBrowser()
-        browser.setHtml(RECONCILE_HELP_HTML)
+        browser.setHtml(wrap_help_html(RECONCILE_HELP_HTML))
         layout.addWidget(browser)
         return page
 

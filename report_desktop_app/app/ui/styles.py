@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from app.ui.themes import DEFAULT_THEME_ID, THEMES, ColorTheme, get_theme, resolve_theme_id
 
-_SETTINGS_KEY = "ui/theme"
+_THEME_SETTINGS_KEY = "ui/theme"
+_ZOOM_SETTINGS_KEY = "ui/zoom_factor"
+_MIN_ZOOM = 0.75
+_MAX_ZOOM = 1.8
 
 
 def load_theme_id() -> str:
     settings = QSettings()
-    saved = settings.value(_SETTINGS_KEY, DEFAULT_THEME_ID)
+    saved = settings.value(_THEME_SETTINGS_KEY, DEFAULT_THEME_ID)
     if isinstance(saved, str):
         return resolve_theme_id(saved)
     return DEFAULT_THEME_ID
@@ -20,18 +25,39 @@ def load_theme_id() -> str:
 
 def save_theme_id(theme_id: str) -> None:
     settings = QSettings()
-    settings.setValue(_SETTINGS_KEY, resolve_theme_id(theme_id))
+    settings.setValue(_THEME_SETTINGS_KEY, resolve_theme_id(theme_id))
+
+
+def load_zoom_factor() -> float:
+    settings = QSettings()
+    raw = settings.value(_ZOOM_SETTINGS_KEY, 1.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(_MIN_ZOOM, min(_MAX_ZOOM, value))
+
+
+def save_zoom_factor(factor: float) -> float:
+    value = max(_MIN_ZOOM, min(_MAX_ZOOM, float(factor)))
+    settings = QSettings()
+    settings.setValue(_ZOOM_SETTINGS_KEY, value)
+    return value
 
 
 def current_theme() -> ColorTheme:
     return get_theme(load_theme_id())
 
 
-def build_stylesheet(theme: ColorTheme) -> str:
+def build_stylesheet(theme: ColorTheme, *, zoom_factor: float | None = None) -> str:
     t = theme
-    return f"""
+    css = f"""
         QMainWindow {{
             background-color: {t.bg_main};
+        }}
+        QDialog, QMessageBox {{
+            background-color: {t.bg_main};
+            color: {t.text_primary};
         }}
         QWidget {{
             font-family: "Microsoft JhengHei UI", "Segoe UI", sans-serif;
@@ -301,6 +327,15 @@ def build_stylesheet(theme: ColorTheme) -> str:
             font-family: "Consolas", "Microsoft JhengHei UI", monospace;
             font-size: 12px;
         }}
+        QTextBrowser {{
+            border: 1px solid {t.border};
+            border-radius: 10px;
+            background: {t.card_bg};
+            color: {t.text_primary};
+            padding: 8px;
+            selection-background-color: {t.selection_bg};
+            selection-color: {t.selection_text};
+        }}
 
         QStatusBar {{
             background: {t.statusbar_bg};
@@ -315,6 +350,28 @@ def build_stylesheet(theme: ColorTheme) -> str:
         QMenuBar::item:selected {{
             background: {t.btn_hover};
             border-radius: 4px;
+        }}
+        QMenu {{
+            background: {t.card_bg};
+            color: {t.text_primary};
+            border: 1px solid {t.border};
+            padding: 4px;
+        }}
+        QMenu::item {{
+            padding: 8px 20px 8px 12px;
+            border-radius: 6px;
+        }}
+        QMenu::item:selected {{
+            background: {t.btn_hover};
+            color: {t.text_primary};
+        }}
+        QMenu::separator {{
+            height: 1px;
+            margin: 6px 4px;
+            background: {t.border};
+        }}
+        QMenu::item:disabled {{
+            color: {t.text_muted};
         }}
 
         QLabel[role="hint"] {{
@@ -384,6 +441,18 @@ def build_stylesheet(theme: ColorTheme) -> str:
             font-weight: 600;
             color: {t.zoom_label};
         }}
+        QLabel[status="info"] {{
+            color: {t.status_info};
+            font-weight: 500;
+        }}
+        QLabel[status="error"] {{
+            color: {t.status_error};
+            font-weight: 500;
+        }}
+        QLabel[status="success"] {{
+            color: {t.status_success};
+            font-weight: 500;
+        }}
 
         QScrollArea {{
             border: none;
@@ -443,6 +512,18 @@ def build_stylesheet(theme: ColorTheme) -> str:
             border-color: {t.border};
         }}
         """
+    return _scale_font_sizes(css, zoom_factor or load_zoom_factor())
+
+
+def _scale_font_sizes(css: str, factor: float) -> str:
+    scale = max(_MIN_ZOOM, min(_MAX_ZOOM, factor))
+
+    def _replace(match: re.Match[str]) -> str:
+        size = float(match.group(1))
+        scaled = max(9, int(round(size * scale)))
+        return f"font-size: {scaled}px;"
+
+    return re.sub(r"font-size:\s*([0-9]+(?:\.[0-9]+)?)px;", _replace, css)
 
 
 def apply_app_style(app: QApplication, theme_id: str | None = None) -> ColorTheme:
@@ -456,3 +537,7 @@ def apply_theme(app: QApplication, theme_id: str) -> ColorTheme:
     save_theme_id(theme.id)
     app.setStyleSheet(build_stylesheet(theme))
     return theme
+
+
+def refresh_stylesheet(app: QApplication) -> None:
+    app.setStyleSheet(build_stylesheet(current_theme()))

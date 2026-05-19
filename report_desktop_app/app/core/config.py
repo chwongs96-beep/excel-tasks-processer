@@ -33,13 +33,19 @@ SHARED_CONFIG_DIR = path_resolver.resolve_shared_config_dir(REPO_ROOT, DESKTOP_R
 CANONICAL_SCHEMA_PATH = SHARED_CONFIG_DIR / "canonical_schema.yaml"
 REPORT_DEFINITIONS_PATH = SHARED_CONFIG_DIR / "report_definitions.yaml"
 TEMPLATE_MAPPING_PATH = SHARED_CONFIG_DIR / "template_mapping.yaml"
+SMART_MODE_PATH = SHARED_CONFIG_DIR / "smart_mode.yaml"
 PRESETS_DIR = SHARED_CONFIG_DIR / "mapping_presets"
 RANGE_PRESETS_DIR = SHARED_CONFIG_DIR / "range_presets"
 FILE_FILTER_PRESETS_DIR = SHARED_CONFIG_DIR / "file_filter_presets"
+SETUP_PRESETS_DIR = SHARED_CONFIG_DIR / "setup_presets"
 
 TEMPLATES_DIR = path_resolver.resolve_templates_dir(DESKTOP_ROOT)
 OUTPUT_DIR = path_resolver.resolve_output_dir(DESKTOP_ROOT)
 LOGS_DIR = path_resolver.resolve_logs_dir(DESKTOP_ROOT)
+if path_resolver.is_frozen():
+    DATA_DIR = path_resolver.user_data_dir() / "data"
+else:
+    DATA_DIR = DESKTOP_ROOT / "data"
 ASSETS_DIR = APP_DIR / "assets"
 ICONS_DIR = ASSETS_DIR / "icons"
 
@@ -70,8 +76,10 @@ def ensure_dirs() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     RANGE_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
     FILE_FILTER_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+    SETUP_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
     ICONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -214,6 +222,39 @@ def load_template_config() -> TemplateConfig:
         filename_template=filename_template,
         templates=templates,
     )
+
+
+@lru_cache(maxsize=1)
+def load_smart_mode_config() -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "enabled": True,
+        "advisor": {
+            "auto_apply_threshold": 0.85,
+            "suggest_threshold": 0.60,
+        },
+    }
+    if not SMART_MODE_PATH.is_file():
+        return defaults
+    with SMART_MODE_PATH.open(encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle) or {}
+    if not isinstance(loaded, dict):
+        return defaults
+    advisor = loaded.get("advisor", {})
+    if not isinstance(advisor, dict):
+        advisor = {}
+    return {
+        "enabled": bool(loaded.get("enabled", defaults["enabled"])),
+        "advisor": {
+            "auto_apply_threshold": advisor.get(
+                "auto_apply_threshold",
+                defaults["advisor"]["auto_apply_threshold"],
+            ),
+            "suggest_threshold": advisor.get(
+                "suggest_threshold",
+                defaults["advisor"]["suggest_threshold"],
+            ),
+        },
+    }
 
 
 def resolve_template_path(report_type: ReportType) -> Path:

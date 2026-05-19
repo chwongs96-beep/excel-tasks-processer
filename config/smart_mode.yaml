@@ -1,0 +1,5 @@
+enabled: true
+
+advisor:
+  auto_apply_threshold: 0.85
+  suggest_threshold: 0.60

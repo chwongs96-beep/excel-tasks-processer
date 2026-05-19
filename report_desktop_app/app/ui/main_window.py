@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ from app.ui.help_text import (
 from app.ui.session_bar import SessionBar
 from app.ui.table_model import DataFrameTableModel
 from app.ui.task_runner import BackgroundTaskRunner
+from app.ui.ui_utils import themed_help_css, wrap_help_html
 from app.ui.widgets import DataPreviewPanel, LogPanel, ReportSettingsPanel, StatusLabel
 from app.ui.workflow_bar import WorkflowBar
 from app.ui.ui_metrics import (
@@ -56,10 +57,16 @@ from app.ui.step_lists import (
     import_file_steps,
 )
 from app.ui.zoom import UiZoomController
+from app.services.setup_presets import SetupPreset
+from app.services import setup_presets
 
 
 class MainWindow(QMainWindow):
     """Primary window: connects widgets → controller via background tasks."""
+    _PREF_REPORT_TYPE = "ui/prefs/report_type"
+    _PREF_TEMPLATE = "ui/prefs/template_path"
+    _PREF_OUTPUT = "ui/prefs/output_path"
+    _PREF_LAST_OPEN_DIR = "ui/prefs/last_open_dir"
 
     def __init__(self, controller: AppController | None = None) -> None:
         super().__init__()
@@ -97,6 +104,7 @@ class MainWindow(QMainWindow):
 
         self._build_layout()
         self._build_menu()
+        self._load_user_preferences()
         self._connect_signals()
         self._sync_settings_to_controller()
         self._refresh_session_ui(step=0)
@@ -158,6 +166,7 @@ class MainWindow(QMainWindow):
         btn_out.setObjectName("zoomBtn")
         btn_out.setToolTip("縮小（Ctrl + 滾輪向下）")
         btn_out.clicked.connect(self._zoom.zoom_out)
+        self._zoom_btn_out = btn_out
 
         self._zoom_label = QLabel()
         self._zoom_label.setObjectName("zoomPercent")
@@ -168,6 +177,7 @@ class MainWindow(QMainWindow):
         btn_in.setObjectName("zoomBtn")
         btn_in.setToolTip("放大（Ctrl + 滾輪向上）")
         btn_in.clicked.connect(self._zoom.zoom_in)
+        self._zoom_btn_in = btn_in
 
         btn_reset = QPushButton("重設")
         btn_reset.setProperty("compact", True)
@@ -185,6 +195,13 @@ class MainWindow(QMainWindow):
 
     def _on_zoom_changed(self, factor: float) -> None:
         self._zoom_label.setText(self._zoom.percent_label())
+        self._zoom_btn_in.setEnabled(self._zoom.can_zoom_in())
+        self._zoom_btn_out.setEnabled(self._zoom.can_zoom_out())
+        if hasattr(self, "_zoom_preset_actions"):
+            current = int(round(factor * 100))
+            for percent, action in self._zoom_preset_actions.items():
+                action.setChecked(abs(percent - current) <= 1)
+        self._status.show_info(f"介面縮放：{self._zoom.percent_label()}")
 
     def _on_theme_selected(self, theme_id: str, checked: bool) -> None:
         if not checked:
@@ -231,12 +248,33 @@ class MainWindow(QMainWindow):
         zoom_reset.setShortcut("Ctrl+0")
         zoom_reset.triggered.connect(self._zoom.reset)
         view_menu.addAction(zoom_reset)
+        zoom_presets = view_menu.addMenu("固定縮放")
+        preset_group = QActionGroup(self)
+        preset_group.setExclusive(True)
+        self._zoom_preset_actions: dict[int, QAction] = {}
+        for percent in (75, 90, 100, 110, 125, 150):
+            action = QAction(f"{percent}%", self)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked=False, p=percent: self._zoom.set_percent(p)
+            )
+            preset_group.addAction(action)
+            zoom_presets.addAction(action)
+            self._zoom_preset_actions[percent] = action
         view_menu.addSeparator()
         hint = QAction("Ctrl + 滑鼠滾輪可縮放介面", self)
         hint.setEnabled(False)
         view_menu.addAction(hint)
+        view_menu.addSeparator()
+        setup_runner = QAction("Setup 批次執行…", self)
+        setup_runner.triggered.connect(self._on_setup_runner)
+        view_menu.addAction(setup_runner)
 
         menu = self.menuBar().addMenu("說明")
+        guide_action = QAction("完整使用手冊（繁體中文）", self)
+        guide_action.triggered.connect(self._show_user_guide)
+        menu.addAction(guide_action)
+        menu.addSeparator()
         workflow_action = QAction("工作流程說明", self)
         workflow_action.triggered.connect(self._show_workflow_help)
         menu.addAction(workflow_action)
@@ -250,6 +288,43 @@ class MainWindow(QMainWindow):
     def _show_workflow_help(self) -> None:
         QMessageBox.information(self, "工作流程", WORKFLOW_INTRO)
 
+    def _show_user_guide(self) -> None:
+        from app.core import config
+
+        guide_path = config.REPO_ROOT / "docs" / "USER_GUIDE_zh-TW.md"
+        if not guide_path.is_file():
+            QMessageBox.warning(
+                self,
+                "使用手冊",
+                f"找不到手冊檔案：\n{guide_path}",
+            )
+            return
+
+        from PySide6.QtWidgets import QPushButton, QTextBrowser, QVBoxLayout
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("完整使用手冊（繁體中文）")
+        dialog.resize(780, 640)
+        layout = QVBoxLayout(dialog)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.document().setDefaultStyleSheet(themed_help_css())
+        try:
+            browser.setMarkdown(guide_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            browser.setPlainText(guide_path.read_text(encoding="utf-8"))
+            browser.append(f"\n\n（Markdown 顯示失敗：{exc}）")
+
+        open_btn = QPushButton("以系統預設程式開啟檔案…")
+        open_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(guide_path.resolve())))
+        )
+
+        layout.addWidget(browser, stretch=1)
+        layout.addWidget(open_btn)
+        dialog.exec()
+
     def _show_html_help(self, title: str, html: str, *, width: int = 640, height: int = 520) -> None:
         from PySide6.QtWidgets import QTextBrowser, QVBoxLayout
 
@@ -259,7 +334,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.setHtml(html)
+        browser.setHtml(wrap_help_html(html))
         layout.addWidget(browser)
         dialog.exec()
 
@@ -325,6 +400,33 @@ class MainWindow(QMainWindow):
             template_path=template_path,
         )
 
+    def _load_user_preferences(self) -> None:
+        settings = QSettings()
+        report_type_raw = settings.value(
+            self._PREF_REPORT_TYPE,
+            self._settings.report_type.report_type(),
+        )
+        report_type = str(report_type_raw) if report_type_raw is not None else "daily"
+        if report_type not in {"daily", "weekly", "monthly"}:
+            report_type = "daily"
+        self._settings.report_type.set_report_type(report_type)  # type: ignore[arg-type]
+        self._settings.date_range.set_report_type(report_type)  # type: ignore[arg-type]
+
+        template_raw = settings.value(self._PREF_TEMPLATE, self._settings.template.template_path())
+        template = str(template_raw) if template_raw is not None else ""
+        if template:
+            self._settings.template.set_template_path(template)
+        else:
+            self._settings.template.sync_to_report_type(report_type)  # type: ignore[arg-type]
+
+        output_raw = settings.value(self._PREF_OUTPUT, self._settings.output.output_path())
+        output = str(output_raw) if output_raw is not None else ""
+        if output:
+            self._settings.output.set_output_path(output)
+
+    def _save_user_pref(self, key: str, value: str) -> None:
+        QSettings().setValue(key, value)
+
     def _current_date_spec(self) -> DateSpec:
         report_type: ReportType = self._settings.report_type.report_type()
         return self._settings.date_range.build_date_spec(report_type)
@@ -334,12 +436,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_add_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "選擇 Excel 檔案",
-            "",
-            "Excel (*.xlsx *.xls)",
-        )
+        paths = self._pick_excel_files()
         if not paths:
             return
         self._sync_settings_to_controller()
@@ -351,6 +448,25 @@ class MainWindow(QMainWindow):
             lambda tracker: self._controller.action_import_files(path_objs, tracker),
             self._finish_import,
         )
+
+    def _pick_excel_files(self) -> list[str]:
+        settings = QSettings()
+        start_dir_raw = settings.value(self._PREF_LAST_OPEN_DIR, "")
+        start_dir = str(start_dir_raw) if start_dir_raw else str(Path.home())
+
+        dialog = QFileDialog(self, "選擇 Excel 檔案", start_dir)
+        dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        dialog.setNameFilter("Excel (*.xlsx *.xls)")
+        dialog.setViewMode(QFileDialog.ViewMode.Detail)
+        # Use Qt dialog for predictable list/detail selection behavior.
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return []
+        selected = dialog.selectedFiles()
+        if selected:
+            settings.setValue(self._PREF_LAST_OPEN_DIR, str(Path(selected[0]).parent))
+        return selected
 
     def _finish_import(self, result: ActionResult) -> None:
         self._refresh_file_list()
@@ -530,6 +646,10 @@ class MainWindow(QMainWindow):
         loaded = files[index]
         from app.core.mapping_utils import storage_to_ui_mapping, ui_to_storage_mapping
 
+        profile_suggestion = self._controller.suggest_mapping_profile(
+            filename=loaded.path.name,
+            source_columns=loaded.columns,
+        )
         dialog = MappingDialog(
             source_columns=loaded.columns,
             current_mapping=storage_to_ui_mapping(
@@ -537,11 +657,18 @@ class MainWindow(QMainWindow):
                 loaded.path.name,
             ),
             filename=loaded.path.name,
+            profile_suggestion=profile_suggestion,
             parent=self,
         )
         if dialog.exec():
-            stored = ui_to_storage_mapping(dialog.mapping(), loaded.path.name)
+            ui_mapping = dialog.mapping()
+            stored = ui_to_storage_mapping(ui_mapping, loaded.path.name)
             self._controller.set_mapping(stored)
+            self._controller.remember_mapping_profile(
+                filename=loaded.path.name,
+                source_columns=loaded.columns,
+                mapping_ui=ui_mapping,
+            )
             self._refresh_session_ui(step=1)
             self._log.append(
                 f"「{loaded.path.name}」欄位映射已更新（{len(stored)} 項）。",
@@ -880,16 +1007,178 @@ class MainWindow(QMainWindow):
         if not QDesktopServices.openUrl(url) and sys.platform == "win32":
             subprocess.run(["explorer", str(folder)], check=False)
 
+    def _build_current_setup(self) -> SetupPreset:
+        report_type = self._settings.report_type.report_type()
+        date_spec = self._settings.date_range.build_date_spec(report_type)
+        return SetupPreset.from_runtime(
+            name="",
+            report_type=report_type,
+            template_path=Path(self._settings.template.template_path()),
+            output_dir=Path(self._settings.output.output_path()),
+            date_spec=date_spec,
+        )
+
+    def _on_setup_runner(self) -> None:
+        from app.ui.dialogs import SetupRunnerDialog
+
+        dialog = SetupRunnerDialog(
+            current_setup=self._build_current_setup(),
+            parent=self,
+        )
+        if not dialog.exec():
+            return
+        mode = dialog.run_mode()
+        if not mode:
+            return
+        if mode == "all":
+            names = setup_presets.list_presets()
+        else:
+            names = dialog.selected_names()
+        if not names:
+            QMessageBox.information(self, "Setup 批次執行", "沒有可執行的 setup。")
+            return
+
+        setups: list[SetupPreset] = []
+        for name in names:
+            try:
+                setups.append(setup_presets.load_preset(name))
+            except (FileNotFoundError, ValueError) as exc:
+                QMessageBox.warning(self, "載入 setup 失敗", str(exc))
+                return
+
+        original_type = self._controller.session.report_type
+        original_output = self._controller.session.output_dir
+        original_template = self._controller.session.template_path
+        continue_on_error = dialog.continue_on_error()
+
+        def work(tracker: ProcessTracker) -> ActionResult:
+            messages: list[ValidationMessage] = []
+            outputs: list[str] = []
+            all_ok = True
+            for idx, setup in enumerate(setups):
+                tracker.start(idx, f"執行 setup：{setup.name}")
+                self._controller.sync_session_settings(
+                    report_type=setup.report_type,
+                    output_dir=Path(setup.output_dir),
+                    template_path=Path(setup.template_path),
+                )
+                if setup.filter_preset:
+                    filter_result = self._controller.apply_filter_preset(setup.filter_preset)
+                    messages.extend(filter_result.messages)
+                    if filter_result.detail:
+                        messages.append(
+                            ValidationMessage(
+                                level="info",
+                                message=f"[{setup.name}] {filter_result.detail}",
+                            )
+                        )
+                    if not filter_result.ok and not continue_on_error:
+                        all_ok = False
+                        tracker.done(idx)
+                        break
+                if setup.range_preset and self._controller.session.file_paths:
+                    range_result = self._controller.apply_range_preset_to_paths(
+                        setup.range_preset,
+                        self._controller.session.file_paths,
+                    )
+                    messages.extend(range_result.messages)
+                    if range_result.detail:
+                        messages.append(
+                            ValidationMessage(
+                                level="info",
+                                message=f"[{setup.name}] {range_result.detail}",
+                            )
+                        )
+                    if not range_result.ok and not continue_on_error:
+                        all_ok = False
+                        tracker.done(idx)
+                        break
+                if setup.mapping_preset and self._controller.session.file_paths:
+                    mapping_result = self._controller.apply_mapping_preset_to_paths(
+                        setup.mapping_preset,
+                        self._controller.session.file_paths,
+                    )
+                    messages.extend(mapping_result.messages)
+                    if mapping_result.detail:
+                        messages.append(
+                            ValidationMessage(
+                                level="info",
+                                message=f"[{setup.name}] {mapping_result.detail}",
+                            )
+                        )
+                    if not mapping_result.ok and not continue_on_error:
+                        all_ok = False
+                        tracker.done(idx)
+                        break
+                result = self._controller.action_generate(setup.to_date_spec())
+                for msg in result.messages:
+                    messages.append(
+                        ValidationMessage(
+                            level=msg.level,
+                            message=f"[{setup.name}] {msg.message}",
+                            source=msg.source,
+                            code=msg.code,
+                        )
+                    )
+                if result.ok and result.report_outcome and result.report_outcome.output_path:
+                    outputs.append(str(result.report_outcome.output_path))
+                if not result.ok:
+                    all_ok = False
+                    if not continue_on_error:
+                        tracker.done(idx)
+                        break
+                tracker.done(idx)
+            self._controller.sync_session_settings(
+                report_type=original_type,
+                output_dir=original_output,
+                template_path=original_template,
+            )
+            detail = f"已完成 {len(outputs)} / {len(setups)} 個 setup。"
+            return ActionResult(
+                ok=all_ok,
+                action="setup_runner",
+                messages=messages,
+                detail=detail,
+                extra={"outputs": outputs},
+            )
+
+        self._run_with_steps(
+            "setup_runner",
+            [s.name for s in setups],
+            work,
+            self._finish_setup_runner,
+        )
+
+    def _finish_setup_runner(self, result: ActionResult) -> None:
+        self._sync_settings_to_controller()
+        outputs = [str(item) for item in result.extra.get("outputs", [])]
+        if outputs:
+            result.messages.append(
+                ValidationMessage(
+                    level="info",
+                    message="輸出檔案：\n" + "\n".join(outputs),
+                )
+            )
+        self._present_action_result(
+            result,
+            dialog_on_error=True,
+            dialog_on_success=result.ok,
+            success_title="Setup 批次執行完成",
+        )
+
     def _on_report_type_changed(self, report_type: str) -> None:
         self._controller.session.report_type = report_type  # type: ignore[assignment]
+        self._save_user_pref(self._PREF_REPORT_TYPE, report_type)
         self._log.append(f"報表類型：{report_type}", level="info")
 
     def _on_template_changed(self, path: str) -> None:
         self._controller.session.template_path = Path(path)
+        self._save_user_pref(self._PREF_TEMPLATE, str(path))
         self._log.append(f"範本：{Path(path).name}", level="info")
 
     def _on_output_path_changed(self, path: str) -> None:
         self._controller.session.output_dir = Path(path)
+        self._save_user_pref(self._PREF_OUTPUT, str(path))
         self._log.append(f"輸出目錄：{path}", level="info")
 
     # ------------------------------------------------------------------
@@ -951,14 +1240,16 @@ class MainWindow(QMainWindow):
         if isinstance(result, ActionResult) and self._pending_success is not None:
             self._pending_success(result)
             self._pending_success = None
-        if not self._tasks.is_busy:
-            self._status.show_info("就緒")
+        # Failsafe: ensure button lock state always tracks runner state.
+        self._set_busy(self._tasks.is_busy)
 
     def _on_task_failed(self, task_name: str, message: str) -> None:
         if self._process_dialog is not None:
             self._process_dialog.finish(False, message)
         self._log.append(f"[{task_name}] {message}", level="error")
         self._status.show_error("操作失敗")
+        # Failsafe unlock if worker already ended.
+        self._set_busy(self._tasks.is_busy)
         QMessageBox.critical(self, "錯誤", message)
 
     def _set_busy(self, busy: bool) -> None:

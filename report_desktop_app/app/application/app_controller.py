@@ -32,6 +32,8 @@ from app.services.pipeline_runner import generate_report_via_pipeline
 from app.services.batch_report_service import BatchReportRequest, BatchReportService
 from app.services.folder_import import list_excel_files
 from app.services.reconcile_service import ReconcileRequest, ReconcileResult, ReconcileService
+from app.services.smart_profile_service import ProfileSuggestion, SmartProfileService
+from app.core.mapping_utils import remap_preset_for_file
 
 logger = get_logger()
 
@@ -49,6 +51,7 @@ class AppController:
         self._clear = ExcelClearService()
         self._reconcile = ReconcileService()
         self._batch = BatchReportService()
+        self._smart_profile = SmartProfileService()
 
     def sync_session_settings(
         self,
@@ -159,6 +162,70 @@ class AppController:
             action=ActionType.IMPORT,
             messages=messages,
             detail=f"已將範圍 preset「{preset_name}」套用至 {updated} 個檔案。",
+        )
+
+    def apply_mapping_preset_to_paths(
+        self,
+        preset_name: str,
+        paths: list[Path],
+    ) -> ActionResult:
+        from app.services import mapping_presets
+
+        try:
+            preset = mapping_presets.load_preset(preset_name)
+        except (FileNotFoundError, ValueError) as exc:
+            return ActionResult(
+                ok=False,
+                action=ActionType.IMPORT,
+                messages=[ValidationMessage(level="error", message=str(exc))],
+            )
+        merged = dict(self.session.mapping)
+        applied = 0
+        for loaded in self.session.files:
+            if loaded.path not in paths:
+                continue
+            remapped = remap_preset_for_file(
+                preset,
+                loaded.path.name,
+                loaded.columns,
+            )
+            if remapped:
+                merged.update(remapped)
+                applied += 1
+        if applied == 0:
+            return ActionResult(
+                ok=False,
+                action=ActionType.IMPORT,
+                messages=[
+                    ValidationMessage(
+                        level="warning",
+                        message="mapping preset 與目前檔案欄位不符，未套用。",
+                    )
+                ],
+            )
+        self.set_mapping(merged)
+        return ActionResult(
+            ok=True,
+            action=ActionType.IMPORT,
+            detail=f"已將 mapping preset「{preset_name}」套用至 {applied} 個檔案。",
+        )
+
+    def apply_filter_preset(self, preset_name: str) -> ActionResult:
+        from app.services import filter_presets
+
+        try:
+            rules = filter_presets.load_preset(preset_name)
+        except (FileNotFoundError, ValueError) as exc:
+            return ActionResult(
+                ok=False,
+                action=ActionType.IMPORT,
+                messages=[ValidationMessage(level="error", message=str(exc))],
+            )
+        self.session.file_name_filter = rules
+        return ActionResult(
+            ok=True,
+            action=ActionType.IMPORT,
+            detail=f"已套用檔名篩選 preset「{preset_name}」。",
         )
 
     def action_set_adjustment(self, path: Path, spec: SourceRangeSpec | None = None) -> ActionResult:
@@ -373,6 +440,27 @@ class AppController:
     def set_mapping(self, mapping: dict[str, str]) -> None:
         self.session.mapping = dict(mapping)
         logger.info("Mapping updated: %d entries", len(self.session.mapping))
+
+    def suggest_mapping_profile(
+        self,
+        *,
+        filename: str,
+        source_columns: list[str],
+    ) -> ProfileSuggestion | None:
+        return self._smart_profile.suggest(filename=filename, source_columns=source_columns)
+
+    def remember_mapping_profile(
+        self,
+        *,
+        filename: str,
+        source_columns: list[str],
+        mapping_ui: dict[str, str],
+    ) -> None:
+        self._smart_profile.record(
+            filename=filename,
+            source_columns=source_columns,
+            mapping=mapping_ui,
+        )
 
     def action_set_file_range(self, path: Path, spec: SourceRangeSpec) -> ActionResult:
         messages: list[ValidationMessage] = []

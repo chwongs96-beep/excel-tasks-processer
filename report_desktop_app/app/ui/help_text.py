@@ -39,7 +39,7 @@ CONSOLIDATE_AND_SHEETS_HELP_HTML = """
 
 <h3>一、先決定您的目標</h3>
 <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse; width:100%;">
-<tr style="background:#f1f5f9;">
+<tr>
   <th>您的需求</th><th>建議做法</th><th>結果</th>
 </tr>
 <tr>
@@ -81,7 +81,7 @@ CONSOLIDATE_AND_SHEETS_HELP_HTML = """
     若要接著產報：再勾「開啟欄位映射」→ 依序 <em>映射 → 驗證 → 預覽 → 產報</em>。</li>
 </ol>
 
-<p style="background:#eff6ff; padding:10px; border-radius:8px; border:1px solid #bfdbfe;">
+<p>
   <strong>流程圖（本工具合併路徑）</strong><br/>
   匯入多檔 → 每檔設範圍 → 合併精靈 → 輸出 1 個 xlsx（進度視窗逐步顯示）
   →（可選）匯入合併檔 → 映射 → 驗證 → 預覽 → 產報

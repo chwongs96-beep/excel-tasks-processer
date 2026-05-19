@@ -2,10 +2,41 @@
 
 內部使用的 PySide6 桌面應用：匯入 Excel、映射欄位、驗證資料、預覽轉換結果，並依範本產生日/週/月報表。
 
+## 介面預覽
+
+<img src="../docs/assets/desktop-ui-main.png" width="920" alt="證券會計報表工具 — 桌面版主畫面">
+
+左側為資料來源與產出按鈕，中央為五步工作流程、資料預覽與操作日誌。完整介面說明見 [使用者手冊 §3](../docs/USER_GUIDE_zh-TW.md#3-介面總覽)。
+
 ## 環境需求
 
 - Python 3.11+
 - Windows（建議；macOS / Linux 亦可）
+
+## 需要安裝的 Library
+
+執行安裝：
+
+```powershell
+cd report_desktop_app
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+主要套件（`requirements.txt`）：
+
+- `PySide6`：桌面 UI
+- `pandas`：表格與資料轉換
+- `openpyxl`：Excel `.xlsx` 讀寫
+- `xlrd`：Excel `.xls` 讀取
+- `pyyaml`：YAML 設定檔
+- `pytest`：測試
+
+開發/打包追加（`requirements-dev.txt`）：
+
+- `pytest-qt`
+- `pyinstaller`
 
 ## 安裝
 
@@ -50,6 +81,11 @@ python -m pytest -q
 ## 與父 repo 的關係
 
 父目錄提供共用 `reporting/`、`config/*.yaml`、`transformer.py`。本應用為**唯一 UI**（Streamlit 版已移除）。`app/core/reporting_bridge.py` 載入父套件；產報經 `pipeline_runner` 呼叫 `run_report()`。
+
+## 使用者手冊
+
+完整繁體中文操作手冊：**[../docs/USER_GUIDE_zh-TW.md](../docs/USER_GUIDE_zh-TW.md)**  
+（程式內：**說明 → 完整使用手冊（繁體中文）**）
 
 ## 工作流程
 

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from app.core import config
 from app.core.schemas import DateSpec, ReportType
 from app.ui.help_text import BUTTON_TOOLTIPS
+from app.ui.styles import current_theme
 from app.ui.table_model import DataFrameTableModel
 from app.ui.ui_metrics import (
     BTN_HEIGHT,
@@ -62,18 +63,25 @@ from app.ui.ui_utils import (
 class StatusLabel(QLabel):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("status", "info")
         self.setText("就緒")
 
     def show_info(self, text: str) -> None:
-        self.setStyleSheet("color: #64748b;")
+        self.setProperty("status", "info")
+        self.style().unpolish(self)
+        self.style().polish(self)
         self.setText(text)
 
     def show_error(self, text: str) -> None:
-        self.setStyleSheet("color: #dc2626; font-weight: 500;")
+        self.setProperty("status", "error")
+        self.style().unpolish(self)
+        self.style().polish(self)
         self.setText(text)
 
     def show_success(self, text: str) -> None:
-        self.setStyleSheet("color: #059669; font-weight: 500;")
+        self.setProperty("status", "success")
+        self.style().unpolish(self)
+        self.style().polish(self)
         self.setText(text)
 
 
@@ -506,11 +514,12 @@ class LogPanel(QWidget):
         layout.addWidget(self._text)
 
     def append(self, message: str, *, level: str = "info") -> None:
+        theme = current_theme()
         colors = {
-            "info": "#475569",
-            "warning": "#b45309",
-            "error": "#dc2626",
-            "success": "#059669",
+            "info": theme.status_info,
+            "warning": theme.status_warning,
+            "error": theme.status_error,
+            "success": theme.status_success,
         }
         prefix = {"info": "ℹ", "warning": "⚠", "error": "✕", "success": "✓"}.get(level, "·")
         color = colors.get(level, colors["info"])

@@ -85,6 +85,10 @@ class ColorTheme:
     chip_border: str
     zoom_label: str
     status_muted: str
+    status_info: str
+    status_warning: str
+    status_error: str
+    status_success: str
 
 
 def _bright_blue() -> ColorTheme:
@@ -162,6 +166,10 @@ def _bright_blue() -> ColorTheme:
         chip_border="#e2e8f0",
         zoom_label="#1e40af",
         status_muted="#64748b",
+        status_info="#475569",
+        status_warning="#b45309",
+        status_error="#dc2626",
+        status_success="#059669",
     )
 
 
@@ -240,6 +248,10 @@ def _bright_sky() -> ColorTheme:
         chip_border="#bae6fd",
         zoom_label="#0284c7",
         status_muted="#64748b",
+        status_info="#0c4a6e",
+        status_warning="#b45309",
+        status_error="#dc2626",
+        status_success="#059669",
     )
 
 
@@ -318,6 +330,10 @@ def _bright_pearl() -> ColorTheme:
         chip_border="#e4e4e7",
         zoom_label="#4338ca",
         status_muted="#71717a",
+        status_info="#52525b",
+        status_warning="#b45309",
+        status_error="#dc2626",
+        status_success="#059669",
     )
 
 
