@@ -1,0 +1,21 @@
+---
+description: 證券報表專案脈絡 — 接續開發前請讀 PROJECT_CONTEXT
+alwaysApply: true
+---
+
+# 專案脈絡
+
+本 repo 為**證券會計 Excel 報表工具（僅桌面版 PySide6）**。
+
+接續任何功能、重構或除錯前，請先閱讀：
+
+- `docs/PROJECT_CONTEXT.md` — 架構、路徑、測試
+- `README.md` — 安裝與啟動
+
+要點：
+
+- **主入口**：`report_desktop_app/main.py`（`python main.py`）
+- **管線**：`reporting/pipeline.run_report()`；桌面產報見 `app/services/pipeline_runner.py`
+- **設定**：`config/*.yaml`；Python 用 `app_config.py`（`config.py` 為 shim）
+- **勿恢復** Streamlit / `app_ui`（已移除）
+- 勿編輯 `C:\Users\CheChe\.cursor\plans\會計報表自動化工具_14fd6da6.plan.md`

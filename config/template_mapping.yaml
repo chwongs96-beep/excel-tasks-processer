@@ -1,0 +1,62 @@
+# Excel template layout per report type.
+# Keys under table_mappings match report_definitions.yaml output `id` values.
+
+export:
+  output_dir: output
+  templates_dir: templates
+  filename_template: "{report_type}_{period_label}.xlsx"
+
+templates:
+  daily:
+    file: daily_report.xlsx
+    metadata_cells:
+      report_title: B2
+      period_label: B3
+      generated_at: B4
+    table_mappings:
+      summary_by_account:
+        sheet: Summary
+        data_start: A5
+        write_header: false
+        style_reference_row: 4
+      detail:
+        sheet: Detail
+        data_start: A5
+        write_header: false
+        style_reference_row: 4
+
+  weekly:
+    file: weekly_report.xlsx
+    metadata_cells:
+      report_title: B2
+      period_label: B3
+      generated_at: B4
+    table_mappings:
+      summary_by_account:
+        sheet: Summary
+        data_start: A5
+        write_header: false
+        style_reference_row: 4
+      summary_by_symbol:
+        sheet: BySymbol
+        data_start: A5
+        write_header: false
+        style_reference_row: 4
+
+  monthly:
+    file: monthly_report.xlsx
+    metadata_cells:
+      report_title: B2
+      period_label: B3
+      generated_at: B4
+    table_mappings:
+      summary_by_account:
+        sheet: Summary
+        data_start: A5
+        write_header: false
+        style_reference_row: 4
+      detail:
+        sheet: Detail
+        data_start: A5
+        write_header: false
+        style_reference_row: 4

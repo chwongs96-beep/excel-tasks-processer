@@ -1,0 +1,84 @@
+fields:
+  - name: trade_date
+    dtype: datetime
+    required: true
+    aliases:
+      - trade_date
+      - date
+      - txn_date
+      - transaction_date
+      - 交易日期
+      - 日期
+      - 成交日
+  - name: account_id
+    dtype: string
+    required: true
+    aliases:
+      - account_id
+      - account
+      - acct
+      - 帳號
+      - 帳戶
+      - 客戶帳號
+  - name: symbol
+    dtype: string
+    required: false
+    aliases:
+      - symbol
+      - ticker
+      - stock
+      - 代號
+      - 證券代號
+  - name: description
+    dtype: string
+    required: false
+    aliases:
+      - description
+      - desc
+      - memo
+      - 摘要
+      - 說明
+  - name: debit
+    dtype: number
+    required: false
+    aliases:
+      - debit
+      - dr
+      - 借方
+      - 借方金額
+  - name: credit
+    dtype: number
+    required: false
+    aliases:
+      - credit
+      - cr
+      - 貸方
+      - 貸方金額
+  - name: amount
+    dtype: number
+    required: true
+    aliases:
+      - amount
+      - amt
+      - value
+      - net
+      - 金額
+      - 淨額
+  - name: currency
+    dtype: string
+    required: false
+    aliases:
+      - currency
+      - ccy
+      - 幣別
+      - 幣種
+
+date_columns:
+  - trade_date
+
+duplicate_subset:
+  - trade_date
+  - account_id
+  - symbol
+  - amount
+  - _source_file

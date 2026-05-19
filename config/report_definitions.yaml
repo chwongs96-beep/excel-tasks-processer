@@ -1,0 +1,47 @@
+daily:
+  date_mode: single
+  filter_field: trade_date
+  outputs:
+    - id: summary_by_account
+      title: 日報-依帳戶彙總
+      group_by:
+        - account_id
+      measures:
+        amount: sum
+    - id: detail
+      title: 日報-明細
+      group_by: []
+
+weekly:
+  date_mode: range
+  week_start: monday
+  filter_field: trade_date
+  outputs:
+    - id: summary_by_account
+      title: 週報-依帳戶彙總
+      group_by:
+        - account_id
+      measures:
+        amount: sum
+    - id: summary_by_symbol
+      title: 週報-依商品彙總
+      group_by:
+        - symbol
+      measures:
+        amount: sum
+
+monthly:
+  date_mode: month
+  filter_field: trade_date
+  outputs:
+    - id: summary_by_account
+      title: 月報-依帳戶彙總
+      group_by:
+        - account_id
+      measures:
+        amount: sum
+        debit: sum
+        credit: sum
+    - id: detail
+      title: 月報-明細
+      group_by: []

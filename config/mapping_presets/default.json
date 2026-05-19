@@ -1,0 +1,5 @@
+{
+  "ledger.xlsx:交易日期": "trade_date",
+  "ledger.xlsx:帳號": "account_id",
+  "ledger.xlsx:金額": "amount"
+}

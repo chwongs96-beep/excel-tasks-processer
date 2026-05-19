@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.spec.bak
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tests & tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Environment & secrets
+.env
+.env.local
+*.pem
+
+# App outputs & logs
+output/
+report_desktop_app/output/
+logs/
+report_desktop_app/logs/
+*.log
+
+# OS & IDE (keep .cursor/rules if needed — listed explicitly)
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Cursor workspace artifacts (not part of product source)
+agent-transcripts/
+terminals/
+mcps/
+canvases/
+
+# PyInstaller / packaging artifacts
+report_desktop_app/build/
+report_desktop_app/dist/
+
+# Local Excel samples (optional large files)
+*.xlsx
+*.xls
+!tests/fixtures/**/*.xlsx
+!report_desktop_app/tests/fixtures/**/*.xlsx
