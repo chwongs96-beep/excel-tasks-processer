@@ -41,6 +41,7 @@ class ReconcileResult:
     amount_mismatch: pd.DataFrame = field(default_factory=pd.DataFrame)
     output_path: Path | None = None
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 class ReconcileService:
@@ -77,6 +78,18 @@ class ReconcileService:
         left_norm = self._normalize_keys(left, request.key_columns)
         right_norm = self._normalize_keys(right, request.key_columns)
 
+        left_dup_keys, left_dup_rows = self._duplicate_key_stats(left_norm)
+        right_dup_keys, right_dup_rows = self._duplicate_key_stats(right_norm)
+        warnings: list[str] = []
+        if left_dup_keys or right_dup_keys:
+            warnings.append(
+                "偵測到重複對帳鍵：左檔 "
+                f"{left_dup_keys} 個鍵（{left_dup_rows} 列）、右檔 "
+                f"{right_dup_keys} 個鍵（{right_dup_rows} 列）。"
+                "重複鍵會讓 merge 結果列數膨脹，差異筆數可能高於實際交易筆數；"
+                "請補強對帳鍵或先彙總／去重後再對帳。"
+            )
+
         merged = left_norm.merge(
             right_norm,
             on="_reconcile_key",
@@ -106,6 +119,10 @@ class ReconcileService:
             "僅右邊": len(only_right),
             "鍵相符": len(both),
             "金額不符": len(amount_mismatch),
+            "左檔重複鍵": left_dup_keys,
+            "左檔重複列": left_dup_rows,
+            "右檔重複鍵": right_dup_keys,
+            "右檔重複列": right_dup_rows,
         }
 
         output_path: Path | None = None
@@ -123,6 +140,7 @@ class ReconcileService:
                     only_left=only_left,
                     only_right=only_right,
                     amount_mismatch=amount_mismatch,
+                    warnings=warnings,
                     errors=[f"匯出對帳結果失敗：{exc}"],
                 )
 
@@ -133,7 +151,20 @@ class ReconcileService:
             only_right=only_right,
             amount_mismatch=amount_mismatch,
             output_path=output_path,
+            warnings=warnings,
         )
+
+    @staticmethod
+    def _duplicate_key_stats(frame: pd.DataFrame) -> tuple[int, int]:
+        """Return (duplicate_key_count, duplicate_row_count) for _reconcile_key."""
+        if frame.empty or "_reconcile_key" not in frame.columns:
+            return 0, 0
+        counts = frame["_reconcile_key"].value_counts()
+        dup_keys = counts[counts > 1]
+        if dup_keys.empty:
+            return 0, 0
+        duplicate_rows = int(dup_keys.sum() - len(dup_keys))
+        return int(len(dup_keys)), duplicate_rows
 
     @staticmethod
     def _normalize_keys(frame: pd.DataFrame, key_columns: list[str]) -> pd.DataFrame:

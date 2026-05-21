@@ -556,10 +556,7 @@ class AppController:
         result = self._reconcile.reconcile(request)
         messages: list[ValidationMessage] = []
         if result.success:
-            parts = [f"{k}：{v:,}" for k, v in result.summary.items()]
-            messages.append(
-                ValidationMessage(level="info", message="對帳摘要 — " + "；".join(parts))
-            )
+            messages.extend(self._reconcile_result_messages(result))
             audit_log.log_operation(
                 "reconcile",
                 left=request.left_path.name,
@@ -568,17 +565,89 @@ class AppController:
                 summary=result.summary,
                 output=str(result.output_path) if result.output_path else None,
             )
+        for warn in result.warnings:
+            messages.append(
+                ValidationMessage(level="warning", message=warn, code="reconcile_duplicate_keys")
+            )
         for err in result.errors:
             messages.append(ValidationMessage(level="error", message=err, code="reconcile_failed"))
         preview = self._reconcile_preview_frame(result)
         self.session.reconcile_preview = preview
+        summary = result.summary
+        primary_focus = self._reconcile_primary_focus(summary)
         return ActionResult(
             ok=result.success,
             action=ActionType.RECONCILE,
             messages=messages,
             detail=str(result.output_path) if result.output_path else "對帳完成。",
-            extra={"summary": result.summary, "preview_rows": len(preview)},
+            extra={
+                "summary": summary,
+                "preview_rows": len(preview),
+                "summary_text": self.format_reconcile_summary(summary),
+                "primary_focus": primary_focus,
+            },
         )
+
+    @staticmethod
+    def format_reconcile_summary(summary: dict[str, int]) -> str:
+        """Human-readable reconcile summary (shared by log and dialogs)."""
+        only_l = summary.get("僅左邊", 0)
+        only_r = summary.get("僅右邊", 0)
+        matched = summary.get("鍵相符", 0)
+        amt = summary.get("金額不符", 0)
+        left_dup = summary.get("左檔重複鍵", 0)
+        right_dup = summary.get("右檔重複鍵", 0)
+        text = (
+            f"僅左邊 {only_l:,} 筆（左有右無）｜僅右邊 {only_r:,} 筆（右有左無）｜"
+            f"鍵相符 {matched:,} 筆｜金額不符 {amt:,} 筆"
+        )
+        if left_dup or right_dup:
+            text += (
+                f"｜重複鍵：左 {left_dup:,} 個、右 {right_dup:,} 個"
+                "（差異筆數可能因重複鍵而膨脹）"
+            )
+        return text
+
+    @staticmethod
+    def _reconcile_primary_focus(summary: dict[str, int]) -> str:
+        buckets = {
+            "僅左邊": summary.get("僅左邊", 0),
+            "僅右邊": summary.get("僅右邊", 0),
+            "金額不符": summary.get("金額不符", 0),
+        }
+        if not any(buckets.values()):
+            return "鍵相符"
+        label, _ = max(buckets.items(), key=lambda item: item[1])
+        return label
+
+    def _reconcile_result_messages(self, result: ReconcileResult) -> list[ValidationMessage]:
+        summary = result.summary
+        messages = [
+            ValidationMessage(
+                level="info",
+                message="對帳摘要 — " + self.format_reconcile_summary(summary),
+            )
+        ]
+        for key in ("僅左邊", "僅右邊", "金額不符"):
+            count = summary.get(key, 0)
+            if count:
+                messages.append(
+                    ValidationMessage(level="info", message=f"{key}：{count:,} 筆", code=f"reconcile_{key}")
+                )
+        left_dup = summary.get("左檔重複鍵", 0)
+        right_dup = summary.get("右檔重複鍵", 0)
+        if left_dup or right_dup:
+            messages.append(
+                ValidationMessage(
+                    level="warning",
+                    message=(
+                        f"重複對帳鍵：左檔 {left_dup:,} 個鍵、右檔 {right_dup:,} 個鍵。"
+                        "請補強對帳鍵或先彙總，避免把膨脹列數誤判為資料錯誤。"
+                    ),
+                    code="reconcile_duplicate_keys",
+                )
+            )
+        return messages
 
     # ------------------------------------------------------------------
     # Internals

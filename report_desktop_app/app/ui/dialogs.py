@@ -730,12 +730,13 @@ class ReconcileDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("執行對帳")
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._validate_accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
         self._left.currentIndexChanged.connect(self._refresh_columns)
         self._right.currentIndexChanged.connect(self._refresh_columns)
+        self._amount_col.currentIndexChanged.connect(self._update_mode_hint)
         self._refresh_columns()
 
     def _build_help_tab(self) -> QWidget:
@@ -815,6 +816,13 @@ class ReconcileDialog(QDialog):
         )
         self._export.setChecked(True)
         layout.addWidget(self._export)
+
+        self._mode_hint = hint_label(
+            "對帳模式：僅比對鍵是否存在（未選金額欄）。"
+            " 對帳鍵使用兩檔「共同欄位名」（非映射後欄位）。"
+        )
+        self._mode_hint.setWordWrap(True)
+        layout.addWidget(self._mode_hint)
         return page
 
     def _loaded(self, combo: QComboBox) -> LoadedFile:
@@ -851,6 +859,99 @@ class ReconcileDialog(QDialog):
                 idx = self._amount_col.findText(amount)
             if idx >= 0:
                 self._amount_col.setCurrentIndex(idx)
+
+        suggested = suggest_key_columns(left.columns, right.columns)
+        if len(common) < 2:
+            self._meta.setStyleSheet("color: #b45309;")
+        elif not suggested:
+            self._meta.setStyleSheet("color: #b45309;")
+        else:
+            self._meta.setStyleSheet("")
+        self._update_mode_hint()
+
+    def _update_mode_hint(self) -> None:
+        amount = self._amount_col.currentData() or ""
+        if amount:
+            self._mode_hint.setText(
+                f"對帳模式：鍵相符時比對金額欄「{amount}」（容差 {self._tolerance.value():g}）。"
+                " 對帳鍵使用兩檔「共同欄位名」（非映射後欄位）。"
+            )
+        else:
+            self._mode_hint.setText(
+                "對帳模式：僅比對鍵是否存在（未選金額欄，不會產生「金額不符」）。"
+                " 對帳鍵使用兩檔「共同欄位名」（非映射後欄位）。"
+            )
+
+    def _selected_keys(self) -> list[str]:
+        keys: list[str] = []
+        for index in range(self._key_list.count()):
+            item = self._key_list.item(index)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                keys.append(item.text())
+        return keys
+
+    def _validate_accept(self) -> None:
+        left = self._loaded(self._left)
+        right = self._loaded(self._right)
+        if left.path.resolve() == right.path.resolve():
+            QMessageBox.warning(
+                self,
+                "資料對帳",
+                "左右檔案不可相同。\n請選擇兩個不同的 Excel 來源。",
+            )
+            return
+
+        common = sorted(set(left.columns) & set(right.columns))
+        if len(common) < 1:
+            QMessageBox.warning(
+                self,
+                "資料對帳",
+                "兩檔沒有任何共同欄位名稱，無法對帳。\n\n"
+                "建議：\n"
+                "1. 確認兩檔已設定正確「資料範圍」與標題列\n"
+                "2. 先統一欄名（合併或手動調整 Excel 標題）\n"
+                "3. 再重新匯入後執行對帳",
+            )
+            return
+
+        keys = self._selected_keys()
+        if not keys:
+            QMessageBox.warning(self, "資料對帳", "請至少勾選一個對帳鍵欄位。")
+            return
+
+        suggested = suggest_key_columns(left.columns, right.columns)
+        if len(common) < 2 or not suggested:
+            guide = (
+                "共同欄位偏少或無法自動建議對帳鍵。\n"
+                "請確認兩檔標題列一致，或手動勾選能唯一識別交易的欄位組合。"
+            )
+            if (
+                QMessageBox.warning(
+                    self,
+                    "對帳鍵提示",
+                    guide + "\n\n仍要繼續執行對帳嗎？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+
+        amount = self._amount_col.currentData() or ""
+        if not amount:
+            if (
+                QMessageBox.information(
+                    self,
+                    "僅存在性比對",
+                    "未選擇金額欄：本次只比對「鍵是否存在」（僅左／僅右），"
+                    "不會產生「金額不符」結果。\n\n確定要繼續嗎？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+
+        self.accept()
 
     def _apply_suggested_keys(self) -> None:
         left = self._loaded(self._left)

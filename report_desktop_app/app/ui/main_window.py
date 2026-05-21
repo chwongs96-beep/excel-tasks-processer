@@ -1287,26 +1287,40 @@ class MainWindow(QMainWindow):
             self._reconcile_model.set_dataframe(frame)
             rows = len(frame)
             summary = result.extra.get("summary") or {}
-            only_l = summary.get("僅左邊", 0)
-            only_r = summary.get("僅右邊", 0)
-            amt = summary.get("金額不符", 0)
-            matched = summary.get("鍵相符", 0)
-            detail = (
-                f"僅左邊 {only_l:,} 筆（左有右無）｜僅右邊 {only_r:,} 筆（右有左無）｜"
-                f"鍵相符 {matched:,} 筆｜金額不符 {amt:,} 筆"
+            detail = result.extra.get("summary_text") or AppController.format_reconcile_summary(summary)
+            focus = result.extra.get("primary_focus") or "僅左邊"
+            self._preview.set_caption(
+                f"對帳差異預覽：共 {rows:,} 列（主差異類型：{focus}）"
             )
-            self._preview.set_caption(f"對帳差異預覽：共 {rows:,} 列差異")
             self._preview.set_reconcile_summary(detail)
             self._preview.show_reconcile_tab()
+            for msg in result.messages:
+                self._log.append(msg.message, level=msg.level)
             body = detail
+            output_path: Path | None = None
             if result.detail and Path(str(result.detail)).suffix == ".xlsx":
-                body += f"\n\n已匯出報告：\n{result.detail}"
+                output_path = Path(str(result.detail))
+                body += f"\n\n已匯出報告：\n{output_path}"
             self._present_action_result(
                 result,
                 dialog_on_error=True,
                 dialog_on_success=False,
             )
-            QMessageBox.information(self, "對帳結果摘要", body)
+            box = QMessageBox(self)
+            box.setWindowTitle("對帳結果摘要")
+            box.setText(body)
+            box.setIcon(QMessageBox.Icon.Information)
+            view_btn = box.addButton("查看對帳差異", QMessageBox.ButtonRole.ActionRole)
+            open_btn = None
+            if output_path and output_path.is_file():
+                open_btn = box.addButton("開啟匯出檔", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == view_btn:
+                self._preview.show_reconcile_tab()
+            elif open_btn is not None and clicked == open_btn and output_path:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(output_path.resolve())))
         else:
             self._present_action_result(
                 result,

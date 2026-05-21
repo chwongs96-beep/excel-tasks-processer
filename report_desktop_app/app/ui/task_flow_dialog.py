@@ -68,6 +68,18 @@ ACTION_TEMPLATES: dict[str, dict[str, object]] = {
     "preview": {"label": "預覽", "help": "執行轉換並產生預覽，不輸出檔案。", "params": ()},
     "generate_report": {"label": "產生報表", "help": "正式產生報表檔案。", "params": ()},
     "clear_files": {"label": "清空檔案清單", "help": "清空目前工作階段已匯入檔案。", "params": ()},
+    "reconcile": {
+        "label": "資料對帳",
+        "help": "比對兩檔共同欄位鍵與可選金額欄。left_file/right_file 可填檔名（工作階段內）或完整路徑。",
+        "params": (
+            ("left_file", "左檔（檔名或路徑）", "ledger.xlsx"),
+            ("right_file", "右檔（檔名或路徑）", "system.xlsx"),
+            ("key_columns", "對帳鍵（逗號分隔）", "日期,帳號"),
+            ("amount_column", "金額欄（可留空）", "金額"),
+            ("tolerance", "金額容差", "0.01"),
+            ("output_name", "匯出檔名（可留空）", "reconcile_diff.xlsx"),
+        ),
+    },
 }
 
 FLOW_BLUEPRINTS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -84,6 +96,10 @@ FLOW_BLUEPRINTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("import", "匯入來源"),
         ("apply_mapping_preset", "套用映射"),
         ("generate_report", "產生報表"),
+    ),
+    "匯入後對帳": (
+        ("import", "匯入來源"),
+        ("reconcile", "雙邊對帳"),
     ),
 }
 
@@ -873,6 +889,19 @@ class TaskFlowManagerDialog(QDialog):
         if action in {"apply_filter_preset", "apply_range_preset", "apply_mapping_preset"}:
             if not params.get("preset", "").strip():
                 return f"{action} 需要 preset 名稱。"
+        if action == "reconcile":
+            if not params.get("left_file", "").strip():
+                return "reconcile 需要 left_file（檔名或路徑）。"
+            if not params.get("right_file", "").strip():
+                return "reconcile 需要 right_file（檔名或路徑）。"
+            if not params.get("key_columns", "").strip():
+                return "reconcile 需要 key_columns（逗號分隔）。"
+            tolerance = params.get("tolerance", "").strip()
+            if tolerance:
+                try:
+                    float(tolerance)
+                except ValueError:
+                    return "tolerance 需為數字。"
         for key in ("trade_date", "week_start", "week_end", "month"):
             value = params.get(key, "").strip()
             if not value:

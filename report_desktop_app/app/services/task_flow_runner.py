@@ -8,7 +8,9 @@ from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Callable
 
+from app.core.range_spec import SourceRangeSpec
 from app.core.schemas import ActionResult, DateSpec, ValidationMessage
+from app.services.reconcile_service import ReconcileRequest
 from app.services.task_flows import TaskFlow
 
 if TYPE_CHECKING:
@@ -167,6 +169,10 @@ class TaskFlowRunner:
                 messages.append(ValidationMessage(level="info", message=prefix + result.detail))
             if result.ok and result.report_outcome and result.report_outcome.output_path:
                 outputs.append(str(result.report_outcome.output_path))
+            elif result.ok and result.detail:
+                detail_path = Path(str(result.detail))
+                if detail_path.suffix.lower() in {".xlsx", ".xls"} and detail_path.exists():
+                    outputs.append(str(detail_path))
             step_records.append(
                 StepRunRecord(
                     step_index=index,
@@ -277,6 +283,21 @@ class TaskFlowRunner:
             self._controller.clear_files()
             return ActionResult(ok=True, action="task_flow_clear", detail="已清空目前檔案清單。")
 
+        if action == "reconcile":
+            request = _build_reconcile_request(self._controller, params, resources)
+            if request is None:
+                return ActionResult(
+                    ok=False,
+                    action="task_flow_reconcile",
+                    messages=[
+                        ValidationMessage(
+                            level="error",
+                            message="對帳步驟參數不完整或找不到左右檔案。",
+                        )
+                    ],
+                )
+            return self._controller.action_reconcile(request)
+
         return ActionResult(
             ok=False,
             action="task_flow_unknown",
@@ -338,6 +359,61 @@ def _parse_date(value: str | None) -> date | None:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+def _build_reconcile_request(controller, params: dict[str, str], resources: dict[str, str]) -> ReconcileRequest | None:
+    left_raw = (params.get("left_file") or resources.get("left_file", "")).strip()
+    right_raw = (params.get("right_file") or resources.get("right_file", "")).strip()
+    keys_raw = (params.get("key_columns") or resources.get("key_columns", "")).strip()
+    if not left_raw or not right_raw or not keys_raw:
+        return None
+
+    left_path, left_range = _resolve_file_and_range(controller, left_raw)
+    right_path, right_range = _resolve_file_and_range(controller, right_raw)
+    if left_path is None or right_path is None:
+        return None
+    if left_path.resolve() == right_path.resolve():
+        return None
+
+    key_columns = [part.strip() for part in keys_raw.replace(";", ",").split(",") if part.strip()]
+    if not key_columns:
+        return None
+
+    amount_column = (params.get("amount_column") or resources.get("amount_column", "")).strip() or None
+    tolerance_raw = params.get("tolerance") or resources.get("tolerance", "0.01")
+    try:
+        tolerance = float(tolerance_raw)
+    except ValueError:
+        tolerance = 0.01
+
+    output_path = None
+    output_name = (params.get("output_name") or resources.get("output_name", "")).strip()
+    if output_name:
+        output_path = controller.session.output_dir / output_name
+
+    return ReconcileRequest(
+        left_path=left_path,
+        right_path=right_path,
+        left_range=left_range,
+        right_range=right_range,
+        key_columns=key_columns,
+        amount_column=amount_column,
+        tolerance=tolerance,
+        output_path=output_path,
+    )
+
+
+def _resolve_file_and_range(controller, token: str) -> tuple[Path | None, SourceRangeSpec]:
+    path = Path(token)
+    if path.is_file():
+        return path, SourceRangeSpec.default()
+    for loaded in controller.session.files:
+        if loaded.path.name == token or str(loaded.path) == token:
+            return loaded.path, loaded.source_range
+    candidate = controller.session.output_dir / token
+    if candidate.is_file():
+        return candidate, SourceRangeSpec.default()
+    return None, SourceRangeSpec.default()
 
 
 def _truthy(value: str) -> bool:
