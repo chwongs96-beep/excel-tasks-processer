@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+    QResizeEvent,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,7 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.application.app_controller import AppController
-from app.core.config import APP_NAME, APP_VERSION, OUTPUT_DIR
+from app.core.config import ALLOWED_EXTENSIONS, APP_NAME, APP_VERSION, OUTPUT_DIR
 from app.core.schemas import ActionResult, DateSpec, ReportType, ValidationMessage
 from app.ui.dialogs import MappingDialog
 from app.ui.help_text import (
@@ -36,7 +47,14 @@ from app.ui.help_text import (
 from app.ui.session_bar import SessionBar
 from app.ui.table_model import DataFrameTableModel
 from app.ui.task_runner import BackgroundTaskRunner
-from app.ui.ui_utils import themed_help_css, wrap_help_html
+from app.ui.ui_utils import (
+    card_frame,
+    mark_primary,
+    mark_secondary,
+    sized_button,
+    themed_help_css,
+    wrap_help_html,
+)
 from app.ui.widgets import DataPreviewPanel, LogPanel, ReportSettingsPanel, StatusLabel
 from app.ui.workflow_bar import WorkflowBar
 from app.ui.ui_metrics import (
@@ -58,7 +76,8 @@ from app.ui.step_lists import (
 )
 from app.ui.zoom import UiZoomController
 from app.services.setup_presets import SetupPreset
-from app.services import setup_presets
+from app.services import setup_presets, task_flow_history, task_flow_schedules, task_flows
+from app.services.task_flow_runner import TaskFlowRunner
 
 
 class MainWindow(QMainWindow):
@@ -67,6 +86,8 @@ class MainWindow(QMainWindow):
     _PREF_TEMPLATE = "ui/prefs/template_path"
     _PREF_OUTPUT = "ui/prefs/output_path"
     _PREF_LAST_OPEN_DIR = "ui/prefs/last_open_dir"
+    _PREF_HIGH_READABILITY = "ui/prefs/high_readability"
+    _PREF_ONBOARD_SEEN = "ui/prefs/onboard_seen"
 
     def __init__(self, controller: AppController | None = None) -> None:
         super().__init__()
@@ -94,6 +115,7 @@ class MainWindow(QMainWindow):
             self._transformed_model,
             self._reconcile_model,
         )
+        self.setAcceptDrops(True)
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(60_000)
         self._watch_timer.timeout.connect(self._poll_watch_folder)
@@ -106,11 +128,13 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._load_user_preferences()
         self._connect_signals()
+        self._bind_global_shortcuts()
         self._sync_settings_to_controller()
         self._refresh_session_ui(step=0)
         self._on_zoom_changed(self._zoom.factor())
 
         self._log.append(WORKFLOW_INTRO, level="info")
+        self._show_onboarding_once()
 
     # ------------------------------------------------------------------
     # Layout & signals
@@ -129,6 +153,7 @@ class MainWindow(QMainWindow):
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(6)
+        top_layout.addWidget(self._build_quickstart_card())
         top_layout.addWidget(self._workflow)
         top_layout.addWidget(self._session_bar)
         top_layout.addWidget(self._preview, stretch=1)
@@ -152,6 +177,92 @@ class MainWindow(QMainWindow):
         status_bar.addWidget(self._status, 1)
         status_bar.addPermanentWidget(self._build_zoom_controls())
         self.setStatusBar(status_bar)
+
+    def _build_quickstart_card(self) -> QWidget:
+        frame, layout = card_frame("新手導引")
+        intro = QLabel("三步完成常見操作：")
+        intro.setProperty("role", "caption")
+        layout.addWidget(intro)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        quick_report = self._quickstart_button(
+            "⚡",
+            "快速產報",
+            "已匯入後直接產報",
+        )
+        quick_import_reconcile = self._quickstart_button(
+            "🔍",
+            "匯入並對帳",
+            "缺檔時會先引導匯入",
+        )
+        quick_task = self._quickstart_button(
+            "🤖",
+            "任務一鍵跑",
+            "開啟任務管理並執行",
+        )
+        mark_primary(quick_report)
+        mark_secondary(quick_import_reconcile)
+        mark_secondary(quick_task)
+        self._quick_btn_report = quick_report
+        self._quick_btn_reconcile = quick_import_reconcile
+        self._quick_btn_task = quick_task
+        quick_report.setToolTip("已匯入資料後，直接產生報表。")
+        quick_import_reconcile.setToolTip("引導你先匯入，再進入對帳。")
+        quick_task.setToolTip("開啟任務管理，一鍵執行流程。")
+        quick_report.clicked.connect(self._on_generate)
+        quick_import_reconcile.clicked.connect(self._on_quick_import_reconcile)
+        quick_task.clicked.connect(self._on_task_flow_manager)
+        row.addWidget(quick_report)
+        row.addWidget(quick_import_reconcile)
+        row.addWidget(quick_task)
+        row.addStretch()
+        layout.addLayout(row)
+
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        step1 = QLabel("① 先選入口")
+        step2 = QLabel("② 跟著提示")
+        step3 = QLabel("③ 檢視輸出")
+        for chip in (step1, step2, step3):
+            chip.setProperty("role", "stat-chip")
+            chips.addWidget(chip)
+        chips.addStretch()
+        layout.addLayout(chips)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        self._quick_status_report = QLabel()
+        self._quick_status_reconcile = QLabel()
+        self._quick_status_task = QLabel()
+        for label in (
+            self._quick_status_report,
+            self._quick_status_reconcile,
+            self._quick_status_task,
+        ):
+            label.setWordWrap(True)
+            label.setProperty("role", "quickstart-status-muted")
+            status_row.addWidget(label, stretch=1)
+        layout.addLayout(status_row)
+        self._refresh_quickstart_status()
+        return frame
+
+    def _quickstart_button(self, icon: str, title: str, subtitle: str) -> QPushButton:
+        btn = sized_button(f"{icon}  {title}\n{subtitle}", min_width=170)
+        btn.setProperty("quickstart", True)
+        btn.setMinimumHeight(72)
+        return btn
+
+    def _on_quick_import_reconcile(self) -> None:
+        if len(self._controller.session.files) < 2:
+            self._on_add_files()
+            QMessageBox.information(
+                self,
+                "匯入並對帳",
+                "已進入匯入流程；請至少匯入兩個檔案後再點一次此按鈕進行對帳。",
+            )
+            return
+        self._on_reconcile()
 
     def _build_zoom_controls(self) -> QWidget:
         box = QWidget()
@@ -234,6 +345,12 @@ class MainWindow(QMainWindow):
             theme_group.addAction(action)
             theme_menu.addAction(action)
             self._theme_actions[tid] = action
+        high_readability = QAction("高可讀模式", self)
+        high_readability.setCheckable(True)
+        high_readability.setChecked(bool(QSettings().value(self._PREF_HIGH_READABILITY, False, type=bool)))
+        high_readability.triggered.connect(self._on_toggle_high_readability)
+        view_menu.addAction(high_readability)
+        self._high_readability_action = high_readability
         view_menu.addSeparator()
 
         zoom_in = QAction("放大", self)
@@ -269,6 +386,9 @@ class MainWindow(QMainWindow):
         setup_runner = QAction("Setup 批次執行…", self)
         setup_runner.triggered.connect(self._on_setup_runner)
         view_menu.addAction(setup_runner)
+        task_manager = QAction("任務流程管理…", self)
+        task_manager.triggered.connect(self._on_task_flow_manager)
+        view_menu.addAction(task_manager)
 
         menu = self.menuBar().addMenu("說明")
         guide_action = QAction("完整使用手冊（繁體中文）", self)
@@ -349,6 +469,138 @@ class MainWindow(QMainWindow):
             self._workflow_step = step
         self._workflow.set_step(self._workflow_step)
         self._session_bar.refresh(self._controller.session)
+        self._refresh_quickstart_status()
+
+    def _refresh_quickstart_status(self) -> None:
+        if not hasattr(self, "_quick_status_report"):
+            return
+
+        file_count = len(self._controller.session.files)
+        has_mapping = bool(self._controller.session.mapping)
+        task_count = len(task_flows.list_flows())
+
+        if file_count <= 0:
+            self._set_quick_status(
+                self._quick_status_report,
+                "● 尚未匯入檔案",
+                "quickstart-status-muted",
+            )
+        elif has_mapping:
+            self._set_quick_status(
+                self._quick_status_report,
+                f"● 產報就緒（{file_count} 檔）",
+                "quickstart-status-ok",
+            )
+        else:
+            self._set_quick_status(
+                self._quick_status_report,
+                f"● 已匯入 {file_count} 檔，待映射",
+                "quickstart-status-warn",
+            )
+
+        if file_count >= 2:
+            self._set_quick_status(
+                self._quick_status_reconcile,
+                f"● 可對帳（{file_count} 檔）",
+                "quickstart-status-ok",
+            )
+        else:
+            self._set_quick_status(
+                self._quick_status_reconcile,
+                "● 對帳需至少 2 檔",
+                "quickstart-status-warn",
+            )
+
+        if task_count > 0:
+            self._set_quick_status(
+                self._quick_status_task,
+                f"● 已建任務 {task_count} 個",
+                "quickstart-status-ok",
+            )
+        else:
+            self._set_quick_status(
+                self._quick_status_task,
+                "● 尚未建立任務",
+                "quickstart-status-muted",
+            )
+
+    @staticmethod
+    def _set_quick_status(label: QLabel, text: str, role: str) -> None:
+        label.setProperty("role", role)
+        label.style().unpolish(label)
+        label.style().polish(label)
+        label.setText(text)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if not hasattr(self, "_quick_btn_report"):
+            return
+        compact = self.width() < 1400
+        min_w = 150 if compact else 170
+        min_h = 64 if compact else 72
+        for btn in (self._quick_btn_report, self._quick_btn_reconcile, self._quick_btn_task):
+            btn.setMinimumWidth(min_w)
+            btn.setMinimumHeight(min_h)
+        self._refresh_quickstart_status()
+
+    def _refresh_quickstart_status(self) -> None:
+        if not hasattr(self, "_quick_status_report"):
+            return
+        files = len(self._controller.session.files)
+        has_mapping = bool(self._controller.session.mapping)
+        task_count = len(task_flows.list_flows())
+
+        if files > 0 and has_mapping:
+            self._set_quickstart_status(
+                self._quick_status_report,
+                f"● 產報就緒（{files} 檔）",
+                "quickstart-status-ok",
+            )
+        elif files > 0:
+            self._set_quickstart_status(
+                self._quick_status_report,
+                f"● 已匯入 {files} 檔，待映射",
+                "quickstart-status-warn",
+            )
+        else:
+            self._set_quickstart_status(
+                self._quick_status_report,
+                "● 尚未匯入檔案",
+                "quickstart-status-muted",
+            )
+
+        if files >= 2:
+            self._set_quickstart_status(
+                self._quick_status_reconcile,
+                f"● 可對帳（{files} 檔）",
+                "quickstart-status-ok",
+            )
+        else:
+            self._set_quickstart_status(
+                self._quick_status_reconcile,
+                "● 對帳需至少 2 檔",
+                "quickstart-status-warn",
+            )
+
+        if task_count > 0:
+            self._set_quickstart_status(
+                self._quick_status_task,
+                f"● 已建任務 {task_count} 個",
+                "quickstart-status-ok",
+            )
+        else:
+            self._set_quickstart_status(
+                self._quick_status_task,
+                "● 尚未建立任務",
+                "quickstart-status-muted",
+            )
+
+    @staticmethod
+    def _set_quickstart_status(label: QLabel, text: str, role: str) -> None:
+        label.setProperty("role", role)
+        label.style().unpolish(label)
+        label.style().polish(label)
+        label.setText(text)
 
     def _connect_signals(self) -> None:
         panel = self._settings
@@ -380,6 +632,36 @@ class MainWindow(QMainWindow):
         self._tasks.busy_changed.connect(self._set_busy)
         self._tasks.completed.connect(self._on_task_completed)
         self._tasks.failed.connect(self._on_task_failed)
+        self._workflow.step_clicked.connect(self._on_workflow_step_clicked)
+
+    def _bind_global_shortcuts(self) -> None:
+        self._sc_add = QShortcut(QKeySequence("Ctrl+I"), self)
+        self._sc_add.activated.connect(self._on_add_files)
+        self._sc_task = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
+        self._sc_task.activated.connect(self._on_task_flow_manager)
+        self._sc_generate = QShortcut(QKeySequence("Ctrl+Return"), self)
+        self._sc_generate.activated.connect(self._on_generate)
+        self._sc_preview = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
+        self._sc_preview.activated.connect(self._on_preview)
+
+    def _on_workflow_step_clicked(self, index: int) -> None:
+        if index <= 0:
+            self._preview.show_raw_tab()
+            self._status.show_info("已切換到「原始」預覽。")
+            return
+        if index == 1:
+            if self._controller.session.files:
+                self._on_mapping()
+            else:
+                self._on_add_files()
+            return
+        if index == 2:
+            self._on_validate()
+            return
+        if index == 3:
+            self._on_preview()
+            return
+        self._on_generate()
 
     # ------------------------------------------------------------------
     # Settings sync (no business rules)
@@ -423,6 +705,32 @@ class MainWindow(QMainWindow):
         output = str(output_raw) if output_raw is not None else ""
         if output:
             self._settings.output.set_output_path(output)
+        if bool(settings.value(self._PREF_HIGH_READABILITY, False, type=bool)):
+            self._zoom.set_percent(max(110, int(round(self._zoom.factor() * 100))))
+
+    def _show_onboarding_once(self) -> None:
+        settings = QSettings()
+        if bool(settings.value(self._PREF_ONBOARD_SEEN, False, type=bool)):
+            return
+        QMessageBox.information(
+            self,
+            "首次使用導覽",
+            "歡迎使用！建議先從首頁卡片「② 匯入並對帳」開始。\n"
+            "快捷鍵：Ctrl+I 匯入、Ctrl+Shift+P 預覽、Ctrl+Enter 產報。",
+        )
+        settings.setValue(self._PREF_ONBOARD_SEEN, True)
+
+    def _on_toggle_high_readability(self, checked: bool) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        QSettings().setValue(self._PREF_HIGH_READABILITY, bool(checked))
+        if checked:
+            apply_theme(app, "bright_daylight")
+            self._zoom.set_percent(max(110, int(round(self._zoom.factor() * 100))))
+            self._status.show_info("已啟用高可讀模式。")
+        else:
+            self._status.show_info("已關閉高可讀模式。")
 
     def _save_user_pref(self, key: str, value: str) -> None:
         QSettings().setValue(key, value)
@@ -439,34 +747,65 @@ class MainWindow(QMainWindow):
         paths = self._pick_excel_files()
         if not paths:
             return
-        self._sync_settings_to_controller()
-        path_objs = [Path(p) for p in paths]
-        steps = import_file_steps(path_objs)
-        self._run_with_steps(
-            "import",
-            steps,
-            lambda tracker: self._controller.action_import_files(path_objs, tracker),
-            self._finish_import,
-        )
+        self._import_paths([Path(p) for p in paths])
 
     def _pick_excel_files(self) -> list[str]:
         settings = QSettings()
         start_dir_raw = settings.value(self._PREF_LAST_OPEN_DIR, "")
         start_dir = str(start_dir_raw) if start_dir_raw else str(Path.home())
 
-        dialog = QFileDialog(self, "選擇 Excel 檔案", start_dir)
-        dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
-        dialog.setNameFilter("Excel (*.xlsx *.xls)")
-        dialog.setViewMode(QFileDialog.ViewMode.Detail)
-        # Use Qt dialog for predictable list/detail selection behavior.
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return []
-        selected = dialog.selectedFiles()
+        selected, _ = QFileDialog.getOpenFileNames(
+            self,
+            "選擇 Excel 檔案",
+            start_dir,
+            "Excel (*.xlsx *.xls)",
+        )
         if selected:
             settings.setValue(self._PREF_LAST_OPEN_DIR, str(Path(selected[0]).parent))
         return selected
+
+    def _import_paths(self, paths: list[Path]) -> None:
+        if not paths:
+            return
+        self._sync_settings_to_controller()
+        steps = import_file_steps(paths)
+        self._run_with_steps(
+            "import",
+            steps,
+            lambda tracker: self._controller.action_import_files(paths, tracker),
+            self._finish_import,
+        )
+
+    @staticmethod
+    def _extract_excel_paths(event: QDropEvent | QDragEnterEvent) -> list[Path]:
+        if not event.mimeData().hasUrls():
+            return []
+        paths: list[Path] = []
+        for url in event.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_file() and path.suffix.lower() in ALLOWED_EXTENSIONS:
+                paths.append(path)
+        return paths
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        if self._tasks.is_busy:
+            event.ignore()
+            return
+        if self._extract_excel_paths(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        paths = self._extract_excel_paths(event)
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._import_paths(paths)
+        self._log.append(f"已拖曳匯入 {len(paths)} 個 Excel 檔。", level="info")
 
     def _finish_import(self, result: ActionResult) -> None:
         self._refresh_file_list()
@@ -542,6 +881,7 @@ class MainWindow(QMainWindow):
         )
 
     def _poll_watch_folder(self) -> None:
+        self._run_due_task_schedules()
         folder = self._controller.session.watch_folder
         if folder is None or not folder.is_dir():
             return
@@ -567,6 +907,56 @@ class MainWindow(QMainWindow):
             steps,
             lambda tracker: self._controller.action_import_files(new_paths, tracker),
             self._finish_import,
+        )
+
+    def _run_due_task_schedules(self) -> None:
+        if self._tasks.is_busy:
+            return
+        due = task_flow_schedules.acquire_due_schedules(datetime.now())
+        if not due:
+            return
+        flows = []
+        continue_on_error = False
+        for item in due:
+            continue_on_error = continue_on_error or item.continue_on_error
+            try:
+                flow = task_flows.load_flow(item.flow_name)
+            except (FileNotFoundError, ValueError) as exc:
+                self._log.append(f"排程載入失敗：{item.flow_name}（{exc}）", level="error")
+                continue
+            if not flow.enabled:
+                self._log.append(f"排程跳過停用任務：{flow.name}", level="warning")
+                continue
+            flows.append(flow)
+        if not flows:
+            return
+        self._log.append(f"排程觸發：{len(flows)} 個任務開始執行。", level="info")
+        runner = TaskFlowRunner(self._controller)
+
+        def work() -> ActionResult:
+            result = runner.run_many(
+                flows,
+                continue_on_error=continue_on_error,
+            )
+            for run in result.runs:
+                task_flow_history.append_flow_run(asdict(run))
+            return ActionResult(
+                ok=result.ok,
+                action="task_flow_schedule_runner",
+                messages=result.messages,
+                detail=f"排程已執行 {len(flows)} 個任務。",
+                extra={
+                    "outputs": result.outputs,
+                    "failed_flow_name": result.failed_flow_name,
+                    "failed_step_index": result.failed_step_index,
+                    "failed_step_title": result.failed_step_title,
+                },
+            )
+
+        self._run_background(
+            "task_flow_schedule_runner",
+            work,
+            self._finish_scheduled_task_flow_runner,
         )
 
     def _on_adjustment(self) -> None:
@@ -608,17 +998,25 @@ class MainWindow(QMainWindow):
             self._log.append("調整分錄將在驗證／產報時併入（_entry_type=adjustment）。", level="info")
 
     def _on_remove_file(self) -> None:
-        index = self._settings.files.selected_index()
+        indices = self._settings.files.selected_indices()
         files = self._controller.session.files
-        if index < 0 or index >= len(files):
+        if not indices:
             self._log.append("請先選擇要移除的檔案。", level="warning")
             return
-        name = files[index].path.name
-        self._controller.remove_file(files[index].path)
+        chosen = [files[i] for i in indices if 0 <= i < len(files)]
+        if not chosen:
+            self._log.append("請先選擇要移除的檔案。", level="warning")
+            return
+        names = [item.path.name for item in chosen]
+        for item in chosen:
+            self._controller.remove_file(item.path)
         self._refresh_file_list()
         self._update_raw_preview()
         self._transformed_model.set_dataframe(self._controller.session.transformed_preview)
-        self._log.append(f"已移除：{name}", level="info")
+        if len(names) == 1:
+            self._log.append(f"已移除：{names[0]}", level="info")
+        else:
+            self._log.append(f"已移除 {len(names)} 個檔案。", level="info")
 
     def _on_clear_files(self) -> None:
         if not self._controller.session.files:
@@ -640,11 +1038,16 @@ class MainWindow(QMainWindow):
         if not files:
             self._log.append("請先匯入 Excel 再設定欄位映射。", level="warning")
             return
-        index = file_index if file_index is not None else self._settings.files.selected_index()
+        selected = self._settings.files.selected_indices()
+        index = file_index if file_index is not None else (selected[0] if selected else -1)
         if index < 0 or index >= len(files):
             index = 0
         loaded = files[index]
-        from app.core.mapping_utils import storage_to_ui_mapping, ui_to_storage_mapping
+        from app.core.mapping_utils import (
+            remap_preset_for_file,
+            storage_to_ui_mapping,
+            ui_to_storage_mapping,
+        )
 
         profile_suggestion = self._controller.suggest_mapping_profile(
             filename=loaded.path.name,
@@ -662,22 +1065,54 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec():
             ui_mapping = dialog.mapping()
-            stored = ui_to_storage_mapping(ui_mapping, loaded.path.name)
-            self._controller.set_mapping(stored)
+            source_stored = ui_to_storage_mapping(ui_mapping, loaded.path.name)
+            target_indices = (
+                [i for i in selected if 0 <= i < len(files)]
+                if file_index is None and len(selected) > 1
+                else [index]
+            )
+            target_files = [files[i] for i in target_indices]
+            merged = dict(self._controller.session.mapping)
+            target_names = {item.path.name for item in target_files}
+            merged = {
+                key: val
+                for key, val in merged.items()
+                if key.split(":", 1)[0] not in target_names
+            }
+            applied = 0
+            for item in target_files:
+                remapped = remap_preset_for_file(
+                    source_stored,
+                    item.path.name,
+                    item.columns,
+                )
+                if remapped:
+                    merged.update(remapped)
+                    applied += 1
+            self._controller.set_mapping(merged)
             self._controller.remember_mapping_profile(
                 filename=loaded.path.name,
                 source_columns=loaded.columns,
                 mapping_ui=ui_mapping,
             )
             self._refresh_session_ui(step=1)
-            self._log.append(
-                f"「{loaded.path.name}」欄位映射已更新（{len(stored)} 項）。",
-                level="info",
-            )
+            if len(target_files) <= 1:
+                self._log.append(
+                    f"「{loaded.path.name}」欄位映射已更新（{len(source_stored)} 項）。",
+                    level="info",
+                )
+            else:
+                skipped = len(target_files) - applied
+                self._log.append(
+                    f"已套用映射到 {applied} / {len(target_files)} 個檔案。"
+                    + (f"（{skipped} 個檔案欄位不相容已略過）" if skipped else ""),
+                    level="info",
+                )
 
     def _on_range(self) -> None:
         files = self._controller.session.files
-        index = self._settings.files.selected_index()
+        selected = self._settings.files.selected_indices()
+        index = selected[0] if selected else self._settings.files.selected_index()
         if index < 0 or index >= len(files):
             self._log.append("請先選擇要設定範圍的檔案。", level="warning")
             return
@@ -692,10 +1127,30 @@ class MainWindow(QMainWindow):
         )
         if not dialog.exec():
             return
-        result = self._controller.action_set_file_range(loaded.path, dialog.range_spec())
+        spec = dialog.range_spec()
+        target_indices = [i for i in selected if 0 <= i < len(files)] if selected else [index]
+        targets = [files[i] for i in target_indices]
+        success = 0
+        errors: list[str] = []
+        for item in targets:
+            r = self._controller.action_set_file_range(item.path, spec)
+            if r.ok:
+                success += 1
+            else:
+                errors.extend([m.message for m in r.messages if m.level == "error"])
         self._refresh_file_list()
         self._update_raw_preview()
-        self._present_action_result(result, dialog_on_error=True, dialog_on_success=False)
+        if errors:
+            self._log.append("；".join(errors[:2]), level="error")
+            if len(targets) == 1:
+                QMessageBox.warning(self, "套用範圍失敗", errors[0])
+        elif len(targets) == 1:
+            self._log.append(f"已更新「{targets[0].path.name}」範圍。", level="info")
+        if len(targets) > 1:
+            self._log.append(
+                f"已將範圍套用至 {success} / {len(targets)} 個檔案。",
+                level="info",
+            )
 
     def _on_consolidate(self) -> None:
         if not self._controller.session.files:
@@ -1149,6 +1604,177 @@ class MainWindow(QMainWindow):
             self._finish_setup_runner,
         )
 
+    def _on_task_flow_manager(self) -> None:
+        from app.ui.task_flow_dialog import TaskFlowManagerDialog
+
+        dialog = TaskFlowManagerDialog(
+            current_setup=self._build_current_setup(),
+            parent=self,
+        )
+        if not dialog.exec():
+            return
+        mode = dialog.run_mode()
+        if not mode:
+            return
+        if mode == "all":
+            names = task_flows.list_flows()
+        else:
+            names = dialog.selected_names()
+        if not names:
+            QMessageBox.information(self, "任務流程執行", "沒有可執行的任務。")
+            return
+        flows = []
+        for name in names:
+            try:
+                flow = task_flows.load_flow(name)
+            except (FileNotFoundError, ValueError) as exc:
+                QMessageBox.warning(self, "載入任務失敗", str(exc))
+                return
+            if not flow.enabled:
+                continue
+            flows.append(flow)
+        if not flows:
+            QMessageBox.information(self, "任務流程執行", "選取任務皆為停用狀態。")
+            return
+
+        runner = TaskFlowRunner(self._controller)
+        continue_on_error = dialog.continue_on_error()
+
+        def work(tracker: ProcessTracker) -> ActionResult:
+            result = runner.run_many(
+                flows,
+                continue_on_error=continue_on_error,
+                on_flow_start=lambda idx, name: tracker.start(idx, f"執行任務：{name}"),
+                on_flow_done=lambda idx, _name, _ok: tracker.done(idx),
+            )
+            for run in result.runs:
+                task_flow_history.append_flow_run(asdict(run))
+            detail = f"已完成 {len(result.outputs)} 份輸出，共執行 {len(flows)} 個任務。"
+            return ActionResult(
+                ok=result.ok,
+                action="task_flow_runner",
+                messages=result.messages,
+                detail=detail,
+                extra={
+                    "outputs": result.outputs,
+                    "failed_flow_name": result.failed_flow_name,
+                    "failed_step_index": result.failed_step_index,
+                    "failed_step_title": result.failed_step_title,
+                },
+            )
+
+        self._run_with_steps(
+            "task_flow_runner",
+            [flow.name for flow in flows],
+            work,
+            self._finish_task_flow_runner,
+        )
+
+    def _finish_task_flow_runner(self, result: ActionResult) -> None:
+        self._sync_settings_to_controller()
+        outputs = [str(item) for item in result.extra.get("outputs", [])]
+        if outputs:
+            result.messages.append(
+                ValidationMessage(
+                    level="info",
+                    message="輸出檔案：\n" + "\n".join(outputs),
+                )
+            )
+        self._refresh_file_list()
+        self._update_raw_preview()
+        self._present_action_result(
+            result,
+            dialog_on_error=True,
+            dialog_on_success=result.ok,
+            success_title="任務流程執行完成",
+        )
+        if not result.ok:
+            self._prompt_rerun_failed_step(result)
+            self._offer_task_flow_fix(result)
+
+    def _finish_scheduled_task_flow_runner(self, result: ActionResult) -> None:
+        self._sync_settings_to_controller()
+        outputs = [str(item) for item in result.extra.get("outputs", [])]
+        if outputs:
+            self._log.append("排程輸出：\n" + "\n".join(outputs), level="info")
+        if result.ok:
+            self._log.append(result.detail or "排程任務執行完成。", level="success")
+        else:
+            errors = [m.message for m in result.messages if m.level == "error"]
+            self._log.append(
+                "排程任務失敗：" + (errors[0] if errors else (result.detail or "未知錯誤")),
+                level="error",
+            )
+            self._offer_task_flow_fix(result, interactive=False)
+
+    def _offer_task_flow_fix(self, result: ActionResult, *, interactive: bool = True) -> None:
+        errors = [m.message for m in result.messages if m.level == "error"]
+        if not errors:
+            return
+        missing_preset = any(("preset" in msg and ("缺少" in msg or "找不到" in msg)) for msg in errors)
+        if not missing_preset:
+            return
+        if not interactive:
+            self._log.append("建議：開啟「任務流程管理」補齊缺少的 preset 設定。", level="warning")
+            return
+        answer = QMessageBox.question(
+            self,
+            "任務設定建議",
+            "偵測到缺少 preset 設定。\n要立即開啟「任務流程管理」修正嗎？",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._on_task_flow_manager()
+
+    def _prompt_rerun_failed_step(self, result: ActionResult) -> None:
+        failed_flow = str(result.extra.get("failed_flow_name") or "").strip()
+        failed_step = result.extra.get("failed_step_index")
+        if not failed_flow or not isinstance(failed_step, int) or failed_step <= 0:
+            return
+        title = str(result.extra.get("failed_step_title") or f"第 {failed_step} 步")
+        response = QMessageBox.question(
+            self,
+            "任務失敗",
+            f"任務「{failed_flow}」失敗於 {title}。\n是否從該步驟重新執行？",
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            flow = task_flows.load_flow(failed_flow)
+        except (FileNotFoundError, ValueError) as exc:
+            QMessageBox.warning(self, "重跑失敗", str(exc))
+            return
+        runner = TaskFlowRunner(self._controller)
+
+        def work(tracker: ProcessTracker) -> ActionResult:
+            rerun = runner.run_many(
+                [flow],
+                continue_on_error=False,
+                start_step_overrides={flow.name: failed_step},
+                on_flow_start=lambda idx, name: tracker.start(idx, f"續跑任務：{name}"),
+                on_flow_done=lambda idx, _name, _ok: tracker.done(idx),
+            )
+            for run in rerun.runs:
+                task_flow_history.append_flow_run(asdict(run))
+            return ActionResult(
+                ok=rerun.ok,
+                action="task_flow_rerun",
+                messages=rerun.messages,
+                detail=f"已從第 {failed_step} 步重新執行任務「{flow.name}」。",
+                extra={
+                    "outputs": rerun.outputs,
+                    "failed_flow_name": rerun.failed_flow_name,
+                    "failed_step_index": rerun.failed_step_index,
+                    "failed_step_title": rerun.failed_step_title,
+                },
+            )
+
+        self._run_with_steps(
+            "task_flow_rerun",
+            [f"{flow.name}（從第 {failed_step} 步）"],
+            work,
+            self._finish_task_flow_runner,
+        )
+
     def _finish_setup_runner(self, result: ActionResult) -> None:
         self._sync_settings_to_controller()
         outputs = [str(item) for item in result.extra.get("outputs", [])]
@@ -1299,10 +1925,13 @@ class MainWindow(QMainWindow):
             self._log.append(msg.message, level=msg.level)
 
     def _refresh_file_list(self) -> None:
-        items = [
-            (f.path.name, f.row_count, f.range_summary())
-            for f in self._controller.session.files
-        ]
+        mapped_files = {key.split(":", 1)[0] for key in self._controller.session.mapping if ":" in key}
+        items = []
+        for f in self._controller.session.files:
+            sheet = f.source_range.sheet or "-"
+            mapped = "已映射" if f.path.name in mapped_files else "未映射"
+            status = f"{sheet}｜{mapped}"
+            items.append((f.path.name, f.row_count, f.range_summary(), status, str(f.path)))
         self._settings.files.set_files(items)
         self._session_bar.refresh(self._controller.session)
 

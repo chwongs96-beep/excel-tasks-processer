@@ -182,6 +182,17 @@ def build_stylesheet(theme: ColorTheme, *, zoom_factor: float | None = None) -> 
             border-color: {t.border_strong};
             color: {t.card_title};
         }}
+        QPushButton[quickstart="true"] {{
+            text-align: left;
+            padding: 10px 12px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.25;
+        }}
+        QPushButton[quickstart="true"]:hover {{
+            border-color: {t.tab_accent};
+        }}
         QPushButton[ghost="true"] {{
             background: transparent;
             border: 1px solid transparent;
@@ -215,6 +226,12 @@ def build_stylesheet(theme: ColorTheme, *, zoom_factor: float | None = None) -> 
             margin: 3px 0;
             min-height: 48px;
             font-size: 13px;
+        }}
+        QListWidget#fileList::item {{
+            padding: 6px 10px;
+            margin: 2px 0;
+            min-height: 26px;
+            font-size: 12px;
         }}
         QListWidget::item:selected {{
             background: {t.list_selected_bg};
@@ -432,6 +449,21 @@ def build_stylesheet(theme: ColorTheme, *, zoom_factor: float | None = None) -> 
             border-radius: 8px;
             padding: 5px 12px;
             font-size: 11px;
+        }}
+        QLabel[role="quickstart-status-ok"] {{
+            color: {t.status_success};
+            font-size: 12px;
+            padding: 2px 4px;
+        }}
+        QLabel[role="quickstart-status-warn"] {{
+            color: {t.status_warning};
+            font-size: 12px;
+            padding: 2px 4px;
+        }}
+        QLabel[role="quickstart-status-muted"] {{
+            color: {t.status_muted};
+            font-size: 12px;
+            padding: 2px 4px;
         }}
         QLabel#zoomUiLabel {{
             color: {t.status_muted};

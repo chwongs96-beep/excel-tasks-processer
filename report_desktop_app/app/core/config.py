@@ -38,6 +38,7 @@ PRESETS_DIR = SHARED_CONFIG_DIR / "mapping_presets"
 RANGE_PRESETS_DIR = SHARED_CONFIG_DIR / "range_presets"
 FILE_FILTER_PRESETS_DIR = SHARED_CONFIG_DIR / "file_filter_presets"
 SETUP_PRESETS_DIR = SHARED_CONFIG_DIR / "setup_presets"
+TASK_FLOWS_DIR = SHARED_CONFIG_DIR / "task_flows"
 
 TEMPLATES_DIR = path_resolver.resolve_templates_dir(DESKTOP_ROOT)
 OUTPUT_DIR = path_resolver.resolve_output_dir(DESKTOP_ROOT)
@@ -46,6 +47,8 @@ if path_resolver.is_frozen():
     DATA_DIR = path_resolver.user_data_dir() / "data"
 else:
     DATA_DIR = DESKTOP_ROOT / "data"
+TASK_FLOW_RUNS_DIR = DATA_DIR / "task_flow_runs"
+TASK_FLOW_SCHEDULES_PATH = DATA_DIR / "task_flow_schedules.json"
 ASSETS_DIR = APP_DIR / "assets"
 ICONS_DIR = ASSETS_DIR / "icons"
 
@@ -80,6 +83,8 @@ def ensure_dirs() -> None:
     RANGE_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
     FILE_FILTER_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
     SETUP_PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+    TASK_FLOWS_DIR.mkdir(parents=True, exist_ok=True)
+    TASK_FLOW_RUNS_DIR.mkdir(parents=True, exist_ok=True)
     ICONS_DIR.mkdir(parents=True, exist_ok=True)
 
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -102,7 +103,12 @@ class FileImportPanel(QWidget):
         frame, layout = card_frame()
 
         self._list = QListWidget()
-        self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self._list.setObjectName("fileList")
+        self._list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self._list.setUniformItemSizes(True)
+        self._list.setWordWrap(False)
+        self._list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._list.setMinimumHeight(FILE_LIST_MIN_H)
         self._list.setMaximumHeight(FILE_LIST_PREF_H)
         self._list.setSizePolicy(
@@ -111,6 +117,20 @@ class FileImportPanel(QWidget):
         )
         self._list.itemDoubleClicked.connect(self.range_clicked.emit)
         layout.addWidget(self._list)
+
+        quick_select = QHBoxLayout()
+        quick_select.setSpacing(8)
+        self._select_all_btn = sized_button("全選", height=BTN_HEIGHT_COMPACT)
+        self._invert_btn = sized_button("反選", height=BTN_HEIGHT_COMPACT)
+        self._keyword_select_btn = sized_button("關鍵字選取…", height=BTN_HEIGHT_COMPACT)
+        for btn in (self._select_all_btn, self._invert_btn, self._keyword_select_btn):
+            mark_tool(btn)
+            quick_select.addWidget(btn)
+        quick_select.addStretch()
+        self._select_all_btn.clicked.connect(self._select_all)
+        self._invert_btn.clicked.connect(self._invert_selection)
+        self._keyword_select_btn.clicked.connect(self._select_by_keyword)
+        layout.addLayout(quick_select)
 
         row1 = QHBoxLayout()
         row1.setSpacing(10)
@@ -181,6 +201,9 @@ class FileImportPanel(QWidget):
         set_tooltip(self._reconcile_btn, BUTTON_TOOLTIPS["reconcile"])
         set_tooltip(self._adj_btn, BUTTON_TOOLTIPS["adjustment"])
         set_tooltip(self._clear_range_btn, BUTTON_TOOLTIPS["clear_range"])
+        set_tooltip(self._select_all_btn, "選取目前清單中的所有檔案。")
+        set_tooltip(self._invert_btn, "將目前選取反轉（已選改未選，未選改已選）。")
+        set_tooltip(self._keyword_select_btn, "輸入關鍵字後，快速選取檔名符合的項目。")
 
     def set_import_enabled(self, enabled: bool) -> None:
         for btn in (
@@ -194,18 +217,66 @@ class FileImportPanel(QWidget):
             self._reconcile_btn,
             self._clear_range_btn,
             self._clear_btn,
+            self._select_all_btn,
+            self._invert_btn,
+            self._keyword_select_btn,
         ):
             btn.setEnabled(enabled)
 
-    def set_files(self, items: list[tuple[str, int, str]]) -> None:
+    def set_files(self, items: list[tuple[str, int, str, str, str]]) -> None:
         self._list.clear()
-        for name, rows, range_hint in items:
-            short = range_hint if len(range_hint) < 40 else range_hint[:37] + "…"
-            QListWidgetItem(f"{name}\n{rows:,} 列 · {short}", self._list)
+        if not items:
+            placeholder = QListWidgetItem("（尚未匯入檔案，請按「新增檔案」或拖曳 Excel）", self._list)
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            return
+        for name, rows, range_hint, status, full_path in items:
+            text = f"{name}  ｜  {rows:,} 列  ·  {range_hint}  ·  {status}"
+            item = QListWidgetItem(text, self._list)
+            item.setToolTip(f"{text}\n{full_path}")
 
     def selected_index(self) -> int:
         row = self._list.currentRow()
         return row if row >= 0 else -1
+
+    def selected_indices(self) -> list[int]:
+        rows = sorted({item.row() for item in self._list.selectedIndexes()})
+        return [row for row in rows if row >= 0]
+
+    def _select_all(self) -> None:
+        self._list.selectAll()
+
+    def _invert_selection(self) -> None:
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            if item is None:
+                continue
+            item.setSelected(not item.isSelected())
+
+    def _select_by_keyword(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        text, ok = QInputDialog.getText(self, "關鍵字選取", "輸入檔名關鍵字（可用逗號分隔）：")
+        if not ok:
+            return
+        keyword_raw = text.strip()
+        if not keyword_raw:
+            return
+        keywords = [part.strip().lower() for part in keyword_raw.replace(";", ",").split(",")]
+        keywords = [item for item in keywords if item]
+        if not keywords:
+            return
+        matched = 0
+        for index in range(self._list.count()):
+            item = self._list.item(index)
+            if item is None:
+                continue
+            name = item.text().splitlines()[0].lower()
+            hit = any(keyword in name for keyword in keywords)
+            item.setSelected(hit)
+            if hit:
+                matched += 1
+        if matched == 0:
+            QMessageBox.information(self, "關鍵字選取", "沒有符合關鍵字的檔案。")
 
     def select_index(self, index: int) -> None:
         if 0 <= index < self._list.count():
